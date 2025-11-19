@@ -1,0 +1,4 @@
+streamlit
+pandas>=2.2.0
+azure-storage-blob
+anthropic
