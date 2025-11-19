@@ -9,7 +9,7 @@ import os
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="Norkol Roll Stock Search", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Norkol Sheet Stock Search", page_icon="📦", layout="wide")
 
 # Session state: selections & search params
 if "sel_exact_idx" not in st.session_state:
@@ -220,7 +220,7 @@ with st.sidebar:
 # =========================================================
 # MAIN TITLE
 # =========================================================
-st.title("🔍 Norkol Roll Stock Search")
+st.title("🔍 Norkol Sheet Stock Search")
 
 # =========================================================
 # SEARCH FORM
@@ -811,6 +811,7 @@ if not export_df.empty:
     )
 else:
     st.caption("Select rows above to enable CSV export.")
+
 
 
 
