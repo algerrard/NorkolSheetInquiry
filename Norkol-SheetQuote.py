@@ -486,19 +486,22 @@ def run_search(params):
 
         # Ensure numeric types for calculations
         if "QtyOnHand" in exact_matches.columns:
-            exact_matches["QtyOnHand"] = pd.to_numeric(exact_matches["QtyOnHand"], errors="coerce").fillna(0.0)
+            exact_matches["QtyOnHand"] = pd.to_numeric(exact_matches["QtyOnHand"], errors="coerce")
         if inv_col and inv_col in exact_matches.columns:
-            exact_matches[inv_col] = pd.to_numeric(exact_matches[inv_col], errors="coerce").fillna(0.0)
+            exact_matches[inv_col] = pd.to_numeric(exact_matches[inv_col], errors="coerce")
 
-        # AvgCost = (sum inv) / (sum qty) * 100
+        # AvgCost = (sum inv) / (sum qty) * 100 - only where we have valid values
         if inv_col and inv_col in exact_matches.columns and "QtyOnHand" in exact_matches.columns:
             with np.errstate(divide="ignore", invalid="ignore"):
-                exact_matches["AvgCost"] = (
-                    exact_matches[inv_col].values / exact_matches["QtyOnHand"].values
-                ) * 100.0
-                exact_matches["AvgCost"] = pd.Series(exact_matches["AvgCost"]).replace(
-                    [np.inf, -np.inf], np.nan
-                ).fillna(0.0).values
+                exact_matches["AvgCost"] = np.nan
+                valid_mask = (
+                    exact_matches[inv_col].notna() & 
+                    exact_matches["QtyOnHand"].notna() & 
+                    (exact_matches["QtyOnHand"] > 0)
+                )
+                exact_matches.loc[valid_mask, "AvgCost"] = (
+                    (exact_matches.loc[valid_mask, inv_col] / exact_matches.loc[valid_mask, "QtyOnHand"]) * 100.0
+                )
 
         # Drop inventory value column from display
         if inv_col and inv_col in exact_matches.columns:
@@ -525,6 +528,14 @@ def run_search(params):
         # Yield = QtyOnHand * (1 - Waste_Pct/100)
         if "QtyOnHand" in al.columns and "Waste_Pct" in al.columns:
             al["Yield"] = al["QtyOnHand"] * (1 - al["Waste_Pct"] / 100.0)
+
+        # Debug: Check if inventory column exists before groupby
+        if inv_col:
+            if inv_col in al.columns:
+                st.info(f"✓ Found {inv_col} in alternatives before groupby: {len(al)} rows")
+            else:
+                st.error(f"❌ {inv_col} NOT in alternatives before groupby! Columns: {list(al.columns)}")
+
 
         # Group by common columns
         group_cols_alt = ["GradeName", "BasisWt", "Caliper", "Width", "Mill", "Brand"]
@@ -555,28 +566,49 @@ def run_search(params):
 
         alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
 
+        # Debug: Check if inventory column made it through
+        if inv_col:
+            if inv_col in alternative_rolls.columns:
+                null_count = alternative_rolls[inv_col].isna().sum()
+                zero_count = (alternative_rolls[inv_col] == 0).sum()
+                if null_count > 0 or zero_count > 0:
+                    st.warning(f"⚠️ Debug: {null_count} rows have null {inv_col}, {zero_count} rows have zero {inv_col}")
+            else:
+                st.error(f"❌ Debug: Inventory column '{inv_col}' not found in alternatives! Available columns: {list(alternative_rolls.columns)}")
+        else:
+            st.error("❌ Debug: No inventory value column found in source data!")
+
+
         # Ensure numeric types for calculations
         if "QtyOnHand" in alternative_rolls.columns:
-            alternative_rolls["QtyOnHand"] = pd.to_numeric(alternative_rolls["QtyOnHand"], errors="coerce").fillna(0.0)
+            alternative_rolls["QtyOnHand"] = pd.to_numeric(alternative_rolls["QtyOnHand"], errors="coerce")
         if inv_col and inv_col in alternative_rolls.columns:
-            alternative_rolls[inv_col] = pd.to_numeric(alternative_rolls[inv_col], errors="coerce").fillna(0.0)
+            alternative_rolls[inv_col] = pd.to_numeric(alternative_rolls[inv_col], errors="coerce")
         if "Waste_Pct" in alternative_rolls.columns:
             alternative_rolls["Waste_Pct"] = pd.to_numeric(alternative_rolls["Waste_Pct"], errors="coerce").fillna(0.0)
 
-        # AvgCost (material)
+        # AvgCost (material) - only calculate where we have valid inventory values
         if inv_col and inv_col in alternative_rolls.columns and "QtyOnHand" in alternative_rolls.columns:
             with np.errstate(divide="ignore", invalid="ignore"):
-                alternative_rolls["AvgCost"] = (
-                    alternative_rolls[inv_col].values / alternative_rolls["QtyOnHand"].values
-                ) * 100.0
-                alternative_rolls["AvgCost"] = pd.Series(alternative_rolls["AvgCost"]).replace(
-                    [np.inf, -np.inf], np.nan
-                ).fillna(0.0).values
+                # Only calculate where both inv_col and QtyOnHand are not null and qty > 0
+                alternative_rolls["AvgCost"] = np.nan
+                valid_mask = (
+                    alternative_rolls[inv_col].notna() & 
+                    alternative_rolls["QtyOnHand"].notna() & 
+                    (alternative_rolls["QtyOnHand"] > 0)
+                )
+                alternative_rolls.loc[valid_mask, "AvgCost"] = (
+                    (alternative_rolls.loc[valid_mask, inv_col] / alternative_rolls.loc[valid_mask, "QtyOnHand"]) * 100.0
+                )
+        else:
+            alternative_rolls["AvgCost"] = np.nan
 
-        # NetAvgCost = AvgCost × (1 + Waste%)
+        # NetAvgCost = AvgCost × (1 + Waste%) - only where AvgCost is valid
         if "AvgCost" in alternative_rolls.columns and "Waste_Pct" in alternative_rolls.columns:
-            alternative_rolls["NetAvgCost"] = (
-                alternative_rolls["AvgCost"] * (1 + alternative_rolls["Waste_Pct"] / 100.0)
+            alternative_rolls["NetAvgCost"] = np.nan
+            valid_mask = alternative_rolls["AvgCost"].notna()
+            alternative_rolls.loc[valid_mask, "NetAvgCost"] = (
+                alternative_rolls.loc[valid_mask, "AvgCost"] * (1 + alternative_rolls.loc[valid_mask, "Waste_Pct"] / 100.0)
             )
 
         # Conversion metrics
