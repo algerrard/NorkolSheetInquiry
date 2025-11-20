@@ -378,19 +378,43 @@ def run_search(params):
     exact_sheets = pd.DataFrame()
     alt_sheets = pd.DataFrame()
     
-    # Check if sheet dimensions exist in the data
-    has_sheet_width = "Sheet_Width" in filtered.columns or "SheetWidth" in filtered.columns
-    has_sheet_length = "Sheet_Length" in filtered.columns or "SheetLength" in filtered.columns
+    # Check if sheet dimensions exist in the data - try multiple variations
+    # Create a lowercase column map for case-insensitive matching
+    col_map = {col.lower().replace('_', '').replace(' ', ''): col for col in filtered.columns}
+    
+    # Try to find width column
+    width_col = None
+    for variant in ['sheetwidth', 'sheet_width', 'width']:
+        if variant in col_map:
+            width_col = col_map[variant]
+            break
+    
+    # Try to find length column
+    length_col = None
+    for variant in ['sheetlength', 'sheet_length', 'length']:
+        if variant in col_map:
+            length_col = col_map[variant]
+            break
+    
+    has_sheet_width = width_col is not None
+    has_sheet_length = length_col is not None
+    
+    # Debug output to help identify issues
+    if not has_sheet_width or not has_sheet_length:
+        st.warning(f"⚠️ Sheet columns not found. Available columns: {', '.join(filtered.columns[:20])}")
+        if not has_sheet_width:
+            st.info("❌ Sheet width column not found. Looking for: SheetWidth, Sheet_Width, or Width")
+        if not has_sheet_length:
+            st.info("❌ Sheet length column not found. Looking for: SheetLength, Sheet_Length, or Length")
     
     if has_sheet_width and has_sheet_length:
-        # Determine actual column names
-        width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
-        length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
-        
         sheet_data = filtered.copy()
         sheet_data[width_col] = pd.to_numeric(sheet_data[width_col], errors="coerce")
         sheet_data[length_col] = pd.to_numeric(sheet_data[length_col], errors="coerce")
         sheet_data = sheet_data.dropna(subset=[width_col, length_col])
+        
+        # Debug: Show how many sheet records exist
+        st.info(f"✓ Found {len(sheet_data)} sheet records in inventory")
 
         # EXACT SHEET MATCHES: Both width AND length must match exactly
         exact_sheets = sheet_data[
@@ -443,9 +467,6 @@ def run_search(params):
     # PROCESS EXACT MATCHES (sheets only)
     # =========================================================
     if has_sheet_width and has_sheet_length and not exact_sheets.empty:
-        width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
-        length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
-        
         ex = exact_sheets.copy()
         if "Caliper" in ex.columns:
             ex["Caliper"] = pd.to_numeric(ex["Caliper"], errors="coerce")
@@ -498,8 +519,7 @@ def run_search(params):
         # Normalize width column name for grouping
         if "Roll_Width" in al.columns:
             al["Width"] = al["Roll_Width"]
-        elif has_sheet_width:
-            width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
+        elif has_sheet_width and width_col in al.columns:
             al["Width"] = al[width_col]
         
         # Yield = QtyOnHand * (1 - Waste_Pct/100)
@@ -528,14 +548,10 @@ def run_search(params):
         # Keep original width columns for display
         if "Roll_Width" in al.columns:
             agg_alt["Roll_Width"] = "first"
-        if has_sheet_width:
-            width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
-            if width_col in al.columns:
-                agg_alt[width_col] = "first"
-        if has_sheet_length:
-            length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
-            if length_col in al.columns:
-                agg_alt[length_col] = "first"
+        if has_sheet_width and width_col in al.columns:
+            agg_alt[width_col] = "first"
+        if has_sheet_length and length_col in al.columns:
+            agg_alt[length_col] = "first"
 
         alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
 
