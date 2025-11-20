@@ -204,7 +204,7 @@ if df is None:
 # SIDEBAR
 # =========================================================
 with st.sidebar:
-    st.title("📦 Norkol Roll Stock Search")
+    st.title("📦 Norkol Sheet Stock Search")
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.session_state.sel_exact_idx = set()
@@ -811,6 +811,7 @@ if not export_df.empty:
     )
 else:
     st.caption("Select rows above to enable CSV export.")
+
 
 
 
