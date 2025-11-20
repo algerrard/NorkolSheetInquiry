@@ -463,15 +463,21 @@ def run_search(params):
 
         exact_matches = ex.groupby(group_cols_exact, as_index=False).agg(agg_dict_ex)
 
-        # AvgCost = (sum inv) / (sum qty) * 100
+        # Ensure numeric types for calculations
+        if "QtyOnHand" in exact_matches.columns:
+            exact_matches["QtyOnHand"] = pd.to_numeric(exact_matches["QtyOnHand"], errors="coerce").fillna(0.0)
         if inv_col and inv_col in exact_matches.columns:
+            exact_matches[inv_col] = pd.to_numeric(exact_matches[inv_col], errors="coerce").fillna(0.0)
+
+        # AvgCost = (sum inv) / (sum qty) * 100
+        if inv_col and inv_col in exact_matches.columns and "QtyOnHand" in exact_matches.columns:
             with np.errstate(divide="ignore", invalid="ignore"):
                 exact_matches["AvgCost"] = (
-                    exact_matches[inv_col] / exact_matches["QtyOnHand"]
+                    exact_matches[inv_col].values / exact_matches["QtyOnHand"].values
                 ) * 100.0
-                exact_matches["AvgCost"] = exact_matches["AvgCost"].replace(
+                exact_matches["AvgCost"] = pd.Series(exact_matches["AvgCost"]).replace(
                     [np.inf, -np.inf], np.nan
-                ).fillna(0.0)
+                ).fillna(0.0).values
 
         # Drop inventory value column from display
         if inv_col and inv_col in exact_matches.columns:
@@ -533,15 +539,23 @@ def run_search(params):
 
         alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
 
-        # AvgCost (material)
+        # Ensure numeric types for calculations
+        if "QtyOnHand" in alternative_rolls.columns:
+            alternative_rolls["QtyOnHand"] = pd.to_numeric(alternative_rolls["QtyOnHand"], errors="coerce").fillna(0.0)
         if inv_col and inv_col in alternative_rolls.columns:
+            alternative_rolls[inv_col] = pd.to_numeric(alternative_rolls[inv_col], errors="coerce").fillna(0.0)
+        if "Waste_Pct" in alternative_rolls.columns:
+            alternative_rolls["Waste_Pct"] = pd.to_numeric(alternative_rolls["Waste_Pct"], errors="coerce").fillna(0.0)
+
+        # AvgCost (material)
+        if inv_col and inv_col in alternative_rolls.columns and "QtyOnHand" in alternative_rolls.columns:
             with np.errstate(divide="ignore", invalid="ignore"):
                 alternative_rolls["AvgCost"] = (
-                    alternative_rolls[inv_col] / alternative_rolls["QtyOnHand"]
+                    alternative_rolls[inv_col].values / alternative_rolls["QtyOnHand"].values
                 ) * 100.0
-                alternative_rolls["AvgCost"] = alternative_rolls["AvgCost"].replace(
+                alternative_rolls["AvgCost"] = pd.Series(alternative_rolls["AvgCost"]).replace(
                     [np.inf, -np.inf], np.nan
-                ).fillna(0.0)
+                ).fillna(0.0).values
 
         # NetAvgCost = AvgCost × (1 + Waste%)
         if "AvgCost" in alternative_rolls.columns and "Waste_Pct" in alternative_rolls.columns:
