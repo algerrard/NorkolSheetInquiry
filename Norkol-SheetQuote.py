@@ -649,7 +649,8 @@ else:
 # =========================================================
 st.subheader("🎯 Exact Matches")
 if not exact_matches.empty:
-    header_cols = st.columns([0.5, 1.6, 0.9, 0.9, 1.0, 1.0, 1.0, 1.1, 1.1])
+    # 10 columns: checkbox, grade, basis, caliper, sheet width, sheet length, mill, brand, qty, cost
+    header_cols = st.columns([0.5, 1.6, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 1.1, 1.1])
     with header_cols[0]:
         st.markdown("**☑**")
     with header_cols[1]:
@@ -659,19 +660,21 @@ if not exact_matches.empty:
     with header_cols[3]:
         st.markdown("**Caliper**")
     with header_cols[4]:
-        st.markdown("**Width**")
+        st.markdown("**SheetWidth**")
     with header_cols[5]:
-        st.markdown("**Mill**")
+        st.markdown("**SheetLength**")
     with header_cols[6]:
-        st.markdown("**Brand**")
+        st.markdown("**Mill**")
     with header_cols[7]:
-        st.markdown("**QtyOnHand**")
+        st.markdown("**Brand**")
     with header_cols[8]:
+        st.markdown("**QtyOnHand**")
+    with header_cols[9]:
         st.markdown("**AvgCost**")
     st.markdown("---")
 
     for idx, row in exact_matches.iterrows():
-        cols = st.columns([0.5, 1.6, 0.9, 0.9, 1.0, 1.0, 1.0, 1.1, 1.1])
+        cols = st.columns([0.5, 1.6, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 1.1, 1.1])
         key = f"exact_{idx}"
 
         with cols[0]:
@@ -697,18 +700,32 @@ if not exact_matches.empty:
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.3f}" if v is not None else "")
         with cols[4]:
-            v = row.get("Roll_Width", None)
+            # Try to find sheet width column (dynamically named)
+            v = None
+            for col in ["SheetWidth", "Sheet_Width", "Width"]:
+                if col in row.index:
+                    v = row.get(col, None)
+                    break
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.2f}\"" if v is not None else "")
         with cols[5]:
-            st.write(row.get("Mill", ""))
+            # Try to find sheet length column (dynamically named)
+            v = None
+            for col in ["SheetLength", "Sheet_Length", "Length"]:
+                if col in row.index:
+                    v = row.get(col, None)
+                    break
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.2f}\"" if v is not None else "")
         with cols[6]:
-            st.write(row.get("Brand", ""))
+            st.write(row.get("Mill", ""))
         with cols[7]:
+            st.write(row.get("Brand", ""))
+        with cols[8]:
             v = row.get("QtyOnHand", None)
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else "")
-        with cols[8]:
+        with cols[9]:
             v = row.get("AvgCost", None)
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else "")
@@ -736,35 +753,37 @@ if not alternative_rolls.empty:
         if c not in alternative_rolls.columns:
             alternative_rolls[c] = None
 
-    # 16 fixed columns for Alternatives
+    # 18 columns: checkbox, Grade, BasisWt, Caliper, RollWidth, SheetWidth, SheetLength, Mill, Brand, Qty, Splits, Waste%, Yield, NetAvgCost, Lbs/Hr, ConvHrs, Conv$/CWT, FinalCost/CWT
     ratios = [
         0.5,  # 0 checkbox
-        1.6,  # 1 Grade
-        0.9,  # 2 BasisWt
-        0.9,  # 3 Caliper
-        1.0,  # 4 Width
-        1.0,  # 5 Mill
-        1.0,  # 6 Brand
-        1.1,  # 7 Qty
-        0.8,  # 8 Splits
-        0.9,  # 9 Waste%
-        1.1,  # 10 Yield
-        1.1,  # 11 NetAvgCost
-        1.1,  # 12 Lbs/Hr
-        1.1,  # 13 ConvHrs
-        1.1,  # 14 Conv$/CWT
-        1.2   # 15 FinalCost/CWT
+        1.4,  # 1 Grade
+        0.8,  # 2 BasisWt
+        0.8,  # 3 Caliper
+        0.9,  # 4 RollWidth
+        0.9,  # 5 SheetWidth
+        0.9,  # 6 SheetLength
+        0.9,  # 7 Mill
+        0.9,  # 8 Brand
+        1.0,  # 9 Qty
+        0.7,  # 10 Splits
+        0.8,  # 11 Waste%
+        1.0,  # 12 Yield
+        1.0,  # 13 NetAvgCost
+        1.0,  # 14 Lbs/Hr
+        0.9,  # 15 ConvHrs
+        1.0,  # 16 Conv$/CWT
+        1.1   # 17 FinalCost/CWT
     ]
 
     # enforce exact length
-    if len(ratios) != 16:
-        raise ValueError(f"Expected 16 ratios, got {len(ratios)}")
+    if len(ratios) != 18:
+        raise ValueError(f"Expected 18 ratios, got {len(ratios)}")
 
     H = st.columns(ratios)
 
     headers = [
-        "☑", "Grade", "BasisWt", "Caliper", "Width", "Mill", "Brand",
-        "Qty", "Splits", "Waste%", "Yield", "NetAvgCost",
+        "☑", "Grade", "BasisWt", "Caliper", "RollWidth", "SheetWidth", "SheetLength",
+        "Mill", "Brand", "Qty", "Splits", "Waste%", "Yield", "NetAvgCost",
         "Lbs/Hr", "ConvHrs", "Conv$/CWT", "FinalCost/CWT"
     ]
 
@@ -791,53 +810,72 @@ if not alternative_rolls.empty:
         else:
             st.session_state.sel_alt_idx.discard(idx)
 
-        with C[1]:  st.write(row.get('GradeName', ''))
-        with C[2]:
+        with C[1]:  # Grade
+            st.write(row.get('GradeName', ''))
+        with C[2]:  # BasisWt
             v = row.get('BasisWt')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.0f}" if v is not None else '')
-        with C[3]:
+        with C[3]:  # Caliper
             v = row.get('Caliper')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.3f}" if v is not None else '')
-        with C[4]:
+        with C[4]:  # RollWidth
             v = row.get('Roll_Width')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.2f}\"" if v is not None else '')
-        with C[5]:  st.write(row.get('Mill', ''))
-        with C[6]:  st.write(row.get('Brand', ''))
-        with C[7]:
+        with C[5]:  # SheetWidth
+            v = None
+            for col in ["SheetWidth", "Sheet_Width", "Width"]:
+                if col in row.index and col != "Roll_Width":
+                    v = row.get(col, None)
+                    break
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.2f}\"" if v is not None else '')
+        with C[6]:  # SheetLength
+            v = None
+            for col in ["SheetLength", "Sheet_Length", "Length"]:
+                if col in row.index:
+                    v = row.get(col, None)
+                    break
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.2f}\"" if v is not None else '')
+        with C[7]:  # Mill
+            st.write(row.get('Mill', ''))
+        with C[8]:  # Brand
+            st.write(row.get('Brand', ''))
+        with C[9]:  # QtyOnHand
             v = row.get('QtyOnHand')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[8]:
+        with C[10]:  # Splits
             v = row.get('Splits')
             st.write(f"{int(v)}x" if pd.notna(v) else '')
-        with C[9]:
+        with C[11]:  # Waste%
             v = row.get('Waste_Pct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}%" if v is not None else '')
-        with C[10]:
+        with C[12]:  # Yield
             v = row.get('Yield')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[11]:
+        with C[13]:  # NetAvgCost
             v = row.get('NetAvgCost')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[12]:
+        with C[14]:  # Lbs/Hr
             v = row.get('LbsPerHour')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[13]:
+        with C[15]:  # ConvHrs
             v = row.get('ConvHrs')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}h" if v is not None else '')
-        with C[14]:
+        with C[16]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[15]:
+        with C[17]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
