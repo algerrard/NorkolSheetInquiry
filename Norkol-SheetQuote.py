@@ -584,21 +584,6 @@ def run_search(params):
 
     return exact_matches, alternative_rolls, requested_width
 
-        # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
-        if "NetAvgCost" in alternative_rolls.columns and "ConvertingCostPerCWT" in alternative_rolls.columns:
-            alternative_rolls["FinalCostCWT"] = (
-                alternative_rolls["NetAvgCost"].fillna(0.0)
-                + alternative_rolls["ConvertingCostPerCWT"].fillna(0.0)
-            )
-
-        # Drop inventory value column and temporary Width column
-        if inv_col and inv_col in alternative_rolls.columns:
-            alternative_rolls = alternative_rolls.drop(columns=[inv_col], errors="ignore")
-        if "Width" in alternative_rolls.columns:
-            alternative_rolls = alternative_rolls.drop(columns=["Width"], errors="ignore")
-
-    return exact_matches, alternative_rolls, requested_width
-
 
 # =========================================================
 # EXECUTE SEARCH (Unified)
