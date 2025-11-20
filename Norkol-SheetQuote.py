@@ -7,6 +7,25 @@ from datetime import datetime
 import os
 
 # =========================================================
+# SHEET SEARCH ENHANCEMENT - November 2025
+# =========================================================
+# Enhanced to support searching for both sheets and rolls:
+#
+# SHEETS (when both width AND length are provided):
+#   - Exact matches: Both dimensions must match exactly
+#   - Alternatives: Width >= requested AND Length >= requested
+#   - Waste calculation based on total area difference
+#
+# ROLLS (when only roll width is provided):
+#   - Exact matches: Roll width must match exactly  
+#   - Alternatives: Roll width >= requested (can be slit)
+#   - Waste calculation based on width after splitting
+#
+# This allows the app to handle both sheet stock and roll stock
+# inventory with appropriate matching logic for each type.
+# =========================================================
+
+# =========================================================
 # CONFIG
 # =========================================================
 st.set_page_config(page_title="Norkol Sheet Stock Search", page_icon="📦", layout="wide")
@@ -267,7 +286,9 @@ with st.form("search_form"):
             caliper = "All"
 
     with col2:
-        roll_width_input = st.text_input("Roll Width Needed", placeholder='e.g., 48 or 48.5')
+        sheet_width_input = st.text_input("Sheet Width Needed", placeholder='e.g., 48 or 48.5')
+        sheet_length_input = st.text_input("Sheet Length Needed", placeholder='e.g., 36 or 36.5')
+        roll_width_input = st.text_input("Roll Width Needed (for rolls)", placeholder='e.g., 48 or 48.5')
         max_waste_pct = st.number_input(
             "Max Waste % (for alternatives)",
             min_value=0.0,
@@ -308,6 +329,8 @@ def run_search(params):
     grade_name = params.get("grade_name")
     basis_wt = params.get("basis_wt")
     caliper = params.get("caliper")
+    sheet_width_input = params.get("sheet_width_input")
+    sheet_length_input = params.get("sheet_length_input")
     roll_width_input = params.get("roll_width_input")
     max_waste_pct = params.get("max_waste_pct")
     max_diameter = params.get("max_diameter")
@@ -341,39 +364,121 @@ def run_search(params):
     exact_matches = pd.DataFrame()
     alternative_rolls = pd.DataFrame()
     requested_width = None
+    requested_length = None
 
-    if roll_width_input and "Roll_Width" in filtered.columns:
+    # Parse sheet dimensions if provided
+    sheet_width = None
+    sheet_length = None
+    if sheet_width_input:
         try:
-            requested_width = float(str(roll_width_input).strip())
+            sheet_width = float(str(sheet_width_input).strip())
+        except ValueError:
+            st.error("❌ Please enter a valid number for Sheet Width")
+            return exact_matches, alternative_rolls, None
+    
+    if sheet_length_input:
+        try:
+            sheet_length = float(str(sheet_length_input).strip())
+        except ValueError:
+            st.error("❌ Please enter a valid number for Sheet Length")
+            return exact_matches, alternative_rolls, None
+
+    # Parse roll width if provided
+    roll_width = None
+    if roll_width_input:
+        try:
+            roll_width = float(str(roll_width_input).strip())
         except ValueError:
             st.error("❌ Please enter a valid number for Roll Width")
             return exact_matches, alternative_rolls, None
 
+    # Inventory value column
+    inv_col = None
+    for c in ["InvValue", "InvVal", "InventoryValue", "Value"]:
+        if c in filtered.columns:
+            inv_col = c
+            break
+
+    # =========================================================
+    # SHEET SEARCH (if sheet width AND length are provided)
+    # =========================================================
+    if sheet_width is not None and sheet_length is not None:
+        requested_width = sheet_width
+        requested_length = sheet_length
+        
+        # Check if sheet dimensions exist in the data
+        has_sheet_width = "Sheet_Width" in filtered.columns or "SheetWidth" in filtered.columns
+        has_sheet_length = "Sheet_Length" in filtered.columns or "SheetLength" in filtered.columns
+        
+        if not has_sheet_width or not has_sheet_length:
+            st.warning("⚠️ Sheet dimension columns not found in inventory data. Searching for rolls instead based on sheet width.")
+            # Fall through to roll search using sheet_width as roll_width
+            roll_width = sheet_width
+        else:
+            # Determine actual column names
+            width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
+            length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
+            
+            filtered = filtered.copy()
+            filtered[width_col] = pd.to_numeric(filtered[width_col], errors="coerce")
+            filtered[length_col] = pd.to_numeric(filtered[length_col], errors="coerce")
+            filtered = filtered.dropna(subset=[width_col, length_col])
+
+            # EXACT MATCHES: Both width AND length must match exactly
+            exact_raw = filtered[
+                (filtered[width_col].round(2) == round(sheet_width, 2)) &
+                (filtered[length_col].round(2) == round(sheet_length, 2))
+            ].copy()
+
+            # ALTERNATIVES: Width >= requested AND Length >= requested
+            alt_raw = filtered[
+                (filtered[width_col] >= sheet_width) &
+                (filtered[length_col] >= sheet_length) &
+                ~((filtered[width_col].round(2) == round(sheet_width, 2)) &
+                  (filtered[length_col].round(2) == round(sheet_length, 2)))
+            ].copy()
+
+            # For alternatives, calculate waste based on area
+            if len(alt_raw) > 0:
+                alt_raw["Requested_Area"] = sheet_width * sheet_length
+                alt_raw["Actual_Area"] = alt_raw[width_col] * alt_raw[length_col]
+                alt_raw["Waste_Area"] = alt_raw["Actual_Area"] - alt_raw["Requested_Area"]
+                alt_raw["Waste_Pct"] = (alt_raw["Waste_Area"] / alt_raw["Actual_Area"]) * 100.0
+                alt_raw["Splits"] = 1  # Sheets are typically 1:1
+                
+                # Filter by max waste percentage
+                alt_raw = alt_raw[alt_raw["Waste_Pct"] <= max_waste_pct].copy()
+
+            group_cols = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
+
+    # =========================================================
+    # ROLL SEARCH (if roll width is provided or fallback from sheet)
+    # =========================================================
+    elif roll_width is not None and "Roll_Width" in filtered.columns:
+        requested_width = roll_width
+        
         filtered = filtered.copy()
         filtered["Roll_Width"] = pd.to_numeric(filtered["Roll_Width"], errors="coerce")
         filtered = filtered.dropna(subset=["Roll_Width"])
 
-        # Inventory value column
-        inv_col = None
-        for c in ["InvValue", "InvVal", "InventoryValue", "Value"]:
-            if c in filtered.columns:
-                inv_col = c
-                break
+        # EXACT MATCHES: Roll width must match exactly
+        exact_raw = filtered[filtered["Roll_Width"].round(2) == round(roll_width, 2)].copy()
 
-        # Exact raw
-        exact_raw = filtered[filtered["Roll_Width"].round(2) == round(requested_width, 2)].copy()
-
-        # Alternatives raw
-        larger = filtered[filtered["Roll_Width"] > requested_width].copy()
+        # ALTERNATIVES: Roll width >= requested (can be slit down)
+        larger = filtered[filtered["Roll_Width"] >= roll_width].copy()
         if len(larger) > 0:
-            larger["Splits"] = (larger["Roll_Width"] / requested_width).astype(int)
-            larger["Waste_Inches"] = larger["Roll_Width"] - (larger["Splits"] * requested_width)
+            larger["Splits"] = (larger["Roll_Width"] / roll_width).astype(int)
+            larger["Waste_Inches"] = larger["Roll_Width"] - (larger["Splits"] * roll_width)
             larger["Waste_Pct"] = (larger["Waste_Inches"] / larger["Roll_Width"]) * 100.0
             alt_raw = larger[larger["Waste_Pct"] <= max_waste_pct].copy()
         else:
             alt_raw = pd.DataFrame()
 
         group_cols = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
+
+    else:
+        # No width/dimensions specified
+        return exact_matches, alternative_rolls, requested_width
 
         # -------- Exact grouped --------
         if not exact_raw.empty:
@@ -498,6 +603,8 @@ if search_btn:
         "grade_name": grade_name,
         "basis_wt": basis_wt,
         "caliper": caliper,
+        "sheet_width_input": sheet_width_input,
+        "sheet_length_input": sheet_length_input,
         "roll_width_input": roll_width_input,
         "max_waste_pct": max_waste_pct,
         "max_diameter": max_diameter,
@@ -588,8 +695,19 @@ if not exact_matches.empty:
     with st.expander("📋 Exact Details"):
         st.dataframe(exact_matches, use_container_width=True)
 else:
-    if requested_width is not None:
-        st.info(f"No exact matches for {requested_width}\"")
+    params = st.session_state.search_params
+    sw = params.get("sheet_width_input")
+    sl = params.get("sheet_length_input")
+    rw = params.get("roll_width_input")
+    
+    if sw and sl:
+        st.info(f"No exact matches for sheet dimensions {sw}\" × {sl}\"")
+    elif rw:
+        st.info(f"No exact matches for roll width {rw}\"")
+    elif sw:
+        st.info(f"No exact matches for sheet width {sw}\"")
+    else:
+        st.info("No exact matches found")
 
 
 # =========================================================
@@ -711,8 +829,19 @@ if not alternative_rolls.empty:
     with st.expander("📋 Alternative Details"):
         st.dataframe(alternative_rolls, use_container_width=True)
 else:
-    mw = st.session_state.search_params.get("max_waste_pct", max_waste_pct)
-    if requested_width is not None:
+    params = st.session_state.search_params
+    mw = params.get("max_waste_pct", 10.0)
+    sw = params.get("sheet_width_input")
+    sl = params.get("sheet_length_input")
+    rw = params.get("roll_width_input")
+    
+    if sw and sl:
+        st.info(f"No alternatives within {mw}% waste for sheet dimensions {sw}\" × {sl}\"")
+    elif rw:
+        st.info(f"No alternatives within {mw}% waste for roll width {rw}\"")
+    elif sw:
+        st.info(f"No alternatives within {mw}% waste for sheet width {sw}\"")
+    else:
         st.info(f"No alternatives within {mw}% waste")
 
 
@@ -794,14 +923,23 @@ export_df = pd.concat([selected_exact, selected_alt], ignore_index=True) if (
 
 if not export_df.empty:
     bw_token = str(basis_wt) if basis_wt != "All" else ""
-    width_token = str(roll_width_input).strip() if roll_width_input else ""
+    
+    # Build dimension token based on what was searched
+    dim_token = ""
+    if sheet_width_input and sheet_length_input:
+        dim_token = f"{sheet_width_input}x{sheet_length_input}"
+    elif sheet_width_input:
+        dim_token = f"SW{sheet_width_input}"
+    elif roll_width_input:
+        dim_token = f"RW{roll_width_input}"
+    
     fname = "NKQuote.csv"
-    if bw_token and width_token:
-        fname = f"NKQuote_{bw_token}_{width_token}.csv"
+    if bw_token and dim_token:
+        fname = f"NKQuote_{bw_token}_{dim_token}.csv"
     elif bw_token:
         fname = f"NKQuote_{bw_token}.csv"
-    elif width_token:
-        fname = f"NKQuote_{width_token}.csv"
+    elif dim_token:
+        fname = f"NKQuote_{dim_token}.csv"
 
     st.download_button(
         "💾 Export Selected to CSV",
@@ -811,12 +949,3 @@ if not export_df.empty:
     )
 else:
     st.caption("Select rows above to enable CSV export.")
-
-
-
-
-
-
-
-
-
