@@ -7,22 +7,24 @@ from datetime import datetime
 import os
 
 # =========================================================
-# SHEET SEARCH ENHANCEMENT - November 2025
+# SHEET SEARCH APPLICATION - November 2025
 # =========================================================
-# Enhanced to support searching for both sheets and rolls:
+# This app searches for sheet stock by width and length.
+# Results include:
 #
-# SHEETS (when both width AND length are provided):
-#   - Exact matches: Both dimensions must match exactly
-#   - Alternatives: Width >= requested AND Length >= requested
-#   - Waste calculation based on total area difference
+# 1. EXACT SHEET MATCHES:
+#    - Sheets with BOTH width AND length matching exactly
 #
-# ROLLS (when only roll width is provided):
-#   - Exact matches: Roll width must match exactly  
-#   - Alternatives: Roll width >= requested (can be slit)
-#   - Waste calculation based on width after splitting
+# 2. ALTERNATIVE SHEETS:
+#    - Sheets that are >= requested width AND >= requested length
+#    - Waste calculated based on area difference
 #
-# This allows the app to handle both sheet stock and roll stock
-# inventory with appropriate matching logic for each type.
+# 3. ROLLS (as alternatives):
+#    - Rolls that are >= requested width (can be cut to length)
+#    - Shown with splitting calculations and waste %
+#
+# All alternatives are filtered by max waste percentage.
+# Users select from exact and alternative options to build quotes.
 # =========================================================
 
 # =========================================================
@@ -288,7 +290,6 @@ with st.form("search_form"):
     with col2:
         sheet_width_input = st.text_input("Sheet Width Needed", placeholder='e.g., 48 or 48.5')
         sheet_length_input = st.text_input("Sheet Length Needed", placeholder='e.g., 36 or 36.5')
-        roll_width_input = st.text_input("Roll Width Needed (for rolls)", placeholder='e.g., 48 or 48.5')
         max_waste_pct = st.number_input(
             "Max Waste % (for alternatives)",
             min_value=0.0,
@@ -296,16 +297,6 @@ with st.form("search_form"):
             value=10.0,
             step=1.0,
         )
-        max_diameter = st.number_input(
-            "Max Diameter (optional)",
-            min_value=0.0,
-            max_value=60.0,
-            value=0.0,
-            step=1.0,
-            help="Leave at 0 to ignore, or enter max diameter to filter",
-        )
-        if max_diameter == 0:
-            max_diameter = None
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -331,9 +322,7 @@ def run_search(params):
     caliper = params.get("caliper")
     sheet_width_input = params.get("sheet_width_input")
     sheet_length_input = params.get("sheet_length_input")
-    roll_width_input = params.get("roll_width_input")
     max_waste_pct = params.get("max_waste_pct")
-    max_diameter = params.get("max_diameter")
 
     filtered = df.copy()
 
@@ -358,39 +347,23 @@ def run_search(params):
             pd.to_numeric(filtered["Caliper"], errors="coerce").round(3) == float(caliper)
         ]
 
-    if max_diameter is not None and "Diameter" in filtered.columns:
-        filtered = filtered[filtered["Diameter"] <= max_diameter]
-
     exact_matches = pd.DataFrame()
     alternative_rolls = pd.DataFrame()
     requested_width = None
     requested_length = None
 
-    # Parse sheet dimensions if provided
-    sheet_width = None
-    sheet_length = None
-    if sheet_width_input:
-        try:
-            sheet_width = float(str(sheet_width_input).strip())
-        except ValueError:
-            st.error("❌ Please enter a valid number for Sheet Width")
-            return exact_matches, alternative_rolls, None
-    
-    if sheet_length_input:
-        try:
-            sheet_length = float(str(sheet_length_input).strip())
-        except ValueError:
-            st.error("❌ Please enter a valid number for Sheet Length")
-            return exact_matches, alternative_rolls, None
+    # Both width and length are required for search
+    if not sheet_width_input or not sheet_length_input:
+        st.warning("⚠️ Please enter both Sheet Width and Sheet Length to search")
+        return exact_matches, alternative_rolls, None
 
-    # Parse roll width if provided
-    roll_width = None
-    if roll_width_input:
-        try:
-            roll_width = float(str(roll_width_input).strip())
-        except ValueError:
-            st.error("❌ Please enter a valid number for Roll Width")
-            return exact_matches, alternative_rolls, None
+    # Parse sheet dimensions
+    try:
+        requested_width = float(str(sheet_width_input).strip())
+        requested_length = float(str(sheet_length_input).strip())
+    except ValueError:
+        st.error("❌ Please enter valid numbers for Sheet Width and Length")
+        return exact_matches, alternative_rolls, None
 
     # Inventory value column
     inv_col = None
@@ -400,194 +373,229 @@ def run_search(params):
             break
 
     # =========================================================
-    # SHEET SEARCH (if sheet width AND length are provided)
+    # SEARCH FOR SHEETS (width x length products)
     # =========================================================
-    if sheet_width is not None and sheet_length is not None:
-        requested_width = sheet_width
-        requested_length = sheet_length
+    exact_sheets = pd.DataFrame()
+    alt_sheets = pd.DataFrame()
+    
+    # Check if sheet dimensions exist in the data
+    has_sheet_width = "Sheet_Width" in filtered.columns or "SheetWidth" in filtered.columns
+    has_sheet_length = "Sheet_Length" in filtered.columns or "SheetLength" in filtered.columns
+    
+    if has_sheet_width and has_sheet_length:
+        # Determine actual column names
+        width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
+        length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
         
-        # Check if sheet dimensions exist in the data
-        has_sheet_width = "Sheet_Width" in filtered.columns or "SheetWidth" in filtered.columns
-        has_sheet_length = "Sheet_Length" in filtered.columns or "SheetLength" in filtered.columns
-        
-        if not has_sheet_width or not has_sheet_length:
-            st.warning("⚠️ Sheet dimension columns not found in inventory data. Searching for rolls instead based on sheet width.")
-            # Fall through to roll search using sheet_width as roll_width
-            roll_width = sheet_width
-        else:
-            # Determine actual column names
-            width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
-            length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
+        sheet_data = filtered.copy()
+        sheet_data[width_col] = pd.to_numeric(sheet_data[width_col], errors="coerce")
+        sheet_data[length_col] = pd.to_numeric(sheet_data[length_col], errors="coerce")
+        sheet_data = sheet_data.dropna(subset=[width_col, length_col])
+
+        # EXACT SHEET MATCHES: Both width AND length must match exactly
+        exact_sheets = sheet_data[
+            (sheet_data[width_col].round(2) == round(requested_width, 2)) &
+            (sheet_data[length_col].round(2) == round(requested_length, 2))
+        ].copy()
+
+        # ALTERNATIVE SHEETS: Width >= requested AND Length >= requested
+        alt_sheets = sheet_data[
+            (sheet_data[width_col] >= requested_width) &
+            (sheet_data[length_col] >= requested_length) &
+            ~((sheet_data[width_col].round(2) == round(requested_width, 2)) &
+              (sheet_data[length_col].round(2) == round(requested_length, 2)))
+        ].copy()
+
+        # Calculate waste for alternative sheets based on area
+        if len(alt_sheets) > 0:
+            alt_sheets["Requested_Area"] = requested_width * requested_length
+            alt_sheets["Actual_Area"] = alt_sheets[width_col] * alt_sheets[length_col]
+            alt_sheets["Waste_Area"] = alt_sheets["Actual_Area"] - alt_sheets["Requested_Area"]
+            alt_sheets["Waste_Pct"] = (alt_sheets["Waste_Area"] / alt_sheets["Actual_Area"]) * 100.0
+            alt_sheets["Splits"] = 1  # Sheets are typically 1:1
             
-            filtered = filtered.copy()
-            filtered[width_col] = pd.to_numeric(filtered[width_col], errors="coerce")
-            filtered[length_col] = pd.to_numeric(filtered[length_col], errors="coerce")
-            filtered = filtered.dropna(subset=[width_col, length_col])
-
-            # EXACT MATCHES: Both width AND length must match exactly
-            exact_raw = filtered[
-                (filtered[width_col].round(2) == round(sheet_width, 2)) &
-                (filtered[length_col].round(2) == round(sheet_length, 2))
-            ].copy()
-
-            # ALTERNATIVES: Width >= requested AND Length >= requested
-            alt_raw = filtered[
-                (filtered[width_col] >= sheet_width) &
-                (filtered[length_col] >= sheet_length) &
-                ~((filtered[width_col].round(2) == round(sheet_width, 2)) &
-                  (filtered[length_col].round(2) == round(sheet_length, 2)))
-            ].copy()
-
-            # For alternatives, calculate waste based on area
-            if len(alt_raw) > 0:
-                alt_raw["Requested_Area"] = sheet_width * sheet_length
-                alt_raw["Actual_Area"] = alt_raw[width_col] * alt_raw[length_col]
-                alt_raw["Waste_Area"] = alt_raw["Actual_Area"] - alt_raw["Requested_Area"]
-                alt_raw["Waste_Pct"] = (alt_raw["Waste_Area"] / alt_raw["Actual_Area"]) * 100.0
-                alt_raw["Splits"] = 1  # Sheets are typically 1:1
-                
-                # Filter by max waste percentage
-                alt_raw = alt_raw[alt_raw["Waste_Pct"] <= max_waste_pct].copy()
-
-            group_cols = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
+            # Filter by max waste percentage
+            alt_sheets = alt_sheets[alt_sheets["Waste_Pct"] <= max_waste_pct].copy()
 
     # =========================================================
-    # ROLL SEARCH (if roll width is provided or fallback from sheet)
+    # SEARCH FOR ROLLS that can be cut into sheets
     # =========================================================
-    elif roll_width is not None and "Roll_Width" in filtered.columns:
-        requested_width = roll_width
+    roll_results = pd.DataFrame()
+    
+    if "Roll_Width" in filtered.columns:
+        roll_data = filtered.copy()
+        roll_data["Roll_Width"] = pd.to_numeric(roll_data["Roll_Width"], errors="coerce")
+        roll_data = roll_data.dropna(subset=["Roll_Width"])
+
+        # Rolls must be >= requested width to cut sheets
+        suitable_rolls = roll_data[roll_data["Roll_Width"] >= requested_width].copy()
         
-        filtered = filtered.copy()
-        filtered["Roll_Width"] = pd.to_numeric(filtered["Roll_Width"], errors="coerce")
-        filtered = filtered.dropna(subset=["Roll_Width"])
+        if len(suitable_rolls) > 0:
+            # Calculate how many sheets can be cut across the width
+            suitable_rolls["Splits"] = (suitable_rolls["Roll_Width"] / requested_width).astype(int)
+            suitable_rolls["Waste_Inches"] = suitable_rolls["Roll_Width"] - (suitable_rolls["Splits"] * requested_width)
+            suitable_rolls["Waste_Pct"] = (suitable_rolls["Waste_Inches"] / suitable_rolls["Roll_Width"]) * 100.0
+            
+            # Filter by max waste percentage
+            roll_results = suitable_rolls[suitable_rolls["Waste_Pct"] <= max_waste_pct].copy()
 
-        # EXACT MATCHES: Roll width must match exactly
-        exact_raw = filtered[filtered["Roll_Width"].round(2) == round(roll_width, 2)].copy()
+    # =========================================================
+    # PROCESS EXACT MATCHES (sheets only)
+    # =========================================================
+    if has_sheet_width and has_sheet_length and not exact_sheets.empty:
+        width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
+        length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
+        
+        ex = exact_sheets.copy()
+        if "Caliper" in ex.columns:
+            ex["Caliper"] = pd.to_numeric(ex["Caliper"], errors="coerce")
+        if width_col in ex.columns:
+            ex[width_col] = pd.to_numeric(ex[width_col], errors="coerce")
+        if length_col in ex.columns:
+            ex[length_col] = pd.to_numeric(ex[length_col], errors="coerce")
 
-        # ALTERNATIVES: Roll width >= requested (can be slit down)
-        larger = filtered[filtered["Roll_Width"] >= roll_width].copy()
-        if len(larger) > 0:
-            larger["Splits"] = (larger["Roll_Width"] / roll_width).astype(int)
-            larger["Waste_Inches"] = larger["Roll_Width"] - (larger["Splits"] * roll_width)
-            larger["Waste_Pct"] = (larger["Waste_Inches"] / larger["Roll_Width"]) * 100.0
-            alt_raw = larger[larger["Waste_Pct"] <= max_waste_pct].copy()
-        else:
-            alt_raw = pd.DataFrame()
+        group_cols_exact = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
+        group_cols_exact = [c for c in group_cols_exact if c in ex.columns]
+        
+        agg_dict_ex = {"QtyOnHand": "sum"}
+        if inv_col and inv_col in ex.columns:
+            agg_dict_ex[inv_col] = "sum"
 
-        group_cols = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
+        exact_matches = ex.groupby(group_cols_exact, as_index=False).agg(agg_dict_ex)
 
-    else:
-        # No width/dimensions specified
-        return exact_matches, alternative_rolls, requested_width
+        # AvgCost = (sum inv) / (sum qty) * 100
+        if inv_col and inv_col in exact_matches.columns:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                exact_matches["AvgCost"] = (
+                    exact_matches[inv_col] / exact_matches["QtyOnHand"]
+                ) * 100.0
+                exact_matches["AvgCost"] = exact_matches["AvgCost"].replace(
+                    [np.inf, -np.inf], np.nan
+                ).fillna(0.0)
 
-        # -------- Exact grouped --------
-        if not exact_raw.empty:
-            ex = exact_raw.copy()
-            if "Caliper" in ex.columns:
-                ex["Caliper"] = pd.to_numeric(ex["Caliper"], errors="coerce")
-            if "Roll_Width" in ex.columns:
-                ex["Roll_Width"] = pd.to_numeric(ex["Roll_Width"], errors="coerce")
+        # Drop inventory value column from display
+        if inv_col and inv_col in exact_matches.columns:
+            exact_matches = exact_matches.drop(columns=[inv_col], errors="ignore")
 
-            group_cols_exact = [c for c in group_cols if c in ex.columns]
-            agg_dict_ex = {"QtyOnHand": "sum"}
-            if inv_col and inv_col in ex.columns:
-                agg_dict_ex[inv_col] = "sum"
+    # =========================================================
+    # PROCESS ALTERNATIVES (alternative sheets + rolls)
+    # =========================================================
+    alt_combined = pd.concat([alt_sheets, roll_results], ignore_index=True) if (
+        not alt_sheets.empty or not roll_results.empty
+    ) else pd.DataFrame()
 
-            exact_matches = ex.groupby(group_cols_exact, as_index=False).agg(agg_dict_ex)
+    if not alt_combined.empty:
+        al = alt_combined.copy()
+        if "Caliper" in al.columns:
+            al["Caliper"] = pd.to_numeric(al["Caliper"], errors="coerce")
+        
+        # Normalize width column name for grouping
+        if "Roll_Width" in al.columns:
+            al["Width"] = al["Roll_Width"]
+        elif has_sheet_width:
+            width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
+            al["Width"] = al[width_col]
+        
+        # Yield = QtyOnHand * (1 - Waste_Pct/100)
+        if "QtyOnHand" in al.columns and "Waste_Pct" in al.columns:
+            al["Yield"] = al["QtyOnHand"] * (1 - al["Waste_Pct"] / 100.0)
 
-            # AvgCost = (sum inv) / (sum qty) * 100
-            if inv_col and inv_col in exact_matches.columns:
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    exact_matches["AvgCost"] = (
-                        exact_matches[inv_col] / exact_matches["QtyOnHand"]
-                    ) * 100.0
-                    exact_matches["AvgCost"] = exact_matches["AvgCost"].replace(
-                        [np.inf, -np.inf], np.nan
-                    ).fillna(0.0)
+        # Group by common columns
+        group_cols_alt = ["GradeName", "BasisWt", "Caliper", "Width", "Mill", "Brand"]
+        group_cols_alt = [c for c in group_cols_alt if c in al.columns]
+        
+        agg_alt = {
+            "QtyOnHand": "sum",
+            "Yield": "sum",
+            "Splits": "first",
+            "Waste_Pct": "first",
+        }
 
-            # Drop inventory value column from display
-            if inv_col and inv_col in exact_matches.columns:
-                exact_matches = exact_matches.drop(columns=[inv_col], errors="ignore")
+        if "Units" in al.columns:
+            agg_alt["Units"] = "sum"
+        if inv_col and inv_col in al.columns:
+            agg_alt[inv_col] = "sum"
+        if "GradeID" in al.columns:
+            agg_alt["GradeID"] = "first"
+        if "BasisWtUOM" in al.columns:
+            agg_alt["BasisWtUOM"] = "first"
+        # Keep original width columns for display
+        if "Roll_Width" in al.columns:
+            agg_alt["Roll_Width"] = "first"
+        if has_sheet_width:
+            width_col = "Sheet_Width" if "Sheet_Width" in filtered.columns else "SheetWidth"
+            if width_col in al.columns:
+                agg_alt[width_col] = "first"
+        if has_sheet_length:
+            length_col = "Sheet_Length" if "Sheet_Length" in filtered.columns else "SheetLength"
+            if length_col in al.columns:
+                agg_alt[length_col] = "first"
 
-        # -------- Alternatives grouped --------
-        if not alt_raw.empty:
-            al = alt_raw.copy()
-            if "Caliper" in al.columns:
-                al["Caliper"] = pd.to_numeric(al["Caliper"], errors="coerce")
-            if "Roll_Width" in al.columns:
-                al["Roll_Width"] = pd.to_numeric(al["Roll_Width"], errors="coerce")
+        alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
 
-            # Yield = QtyOnHand * (1 - Waste_Pct/100)
-            if "QtyOnHand" in al.columns and "Waste_Pct" in al.columns:
-                al["Yield"] = al["QtyOnHand"] * (1 - al["Waste_Pct"] / 100.0)
+        # AvgCost (material)
+        if inv_col and inv_col in alternative_rolls.columns:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                alternative_rolls["AvgCost"] = (
+                    alternative_rolls[inv_col] / alternative_rolls["QtyOnHand"]
+                ) * 100.0
+                alternative_rolls["AvgCost"] = alternative_rolls["AvgCost"].replace(
+                    [np.inf, -np.inf], np.nan
+                ).fillna(0.0)
 
-            group_cols_alt = [c for c in group_cols if c in al.columns]
-            agg_alt = {
-                "QtyOnHand": "sum",
-                "Yield": "sum",
-                "Splits": "first",
-                "Waste_Pct": "first",
-            }
+        # NetAvgCost = AvgCost × (1 + Waste%)
+        if "AvgCost" in alternative_rolls.columns and "Waste_Pct" in alternative_rolls.columns:
+            alternative_rolls["NetAvgCost"] = (
+                alternative_rolls["AvgCost"] * (1 + alternative_rolls["Waste_Pct"] / 100.0)
+            )
 
-            if "Units" in al.columns:
-                agg_alt["Units"] = "sum"
-            if inv_col and inv_col in al.columns:
-                agg_alt[inv_col] = "sum"
-            if "GradeID" in al.columns:
-                agg_alt["GradeID"] = "first"
-            if "BasisWtUOM" in al.columns:
-                agg_alt["BasisWtUOM"] = "first"
+        # Conversion metrics
+        if (
+            not alternative_rolls.empty
+            and paper_info_df is not None
+            and machine_info_df is not None
+        ):
+            conv_series = alternative_rolls.apply(
+                lambda r: calculate_conversion_cost(
+                    r, requested_width, paper_info_df, machine_info_df
+                ),
+                axis=1,
+            )
 
-            alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
+            if isinstance(conv_series, pd.DataFrame):
+                conv_final = conv_series.reset_index(drop=True)
+            else:
+                conv_final = pd.DataFrame(list(conv_series)).reset_index(drop=True)
 
-            # AvgCost (material)
-            if inv_col and inv_col in alternative_rolls.columns:
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    alternative_rolls["AvgCost"] = (
-                        alternative_rolls[inv_col] / alternative_rolls["QtyOnHand"]
-                    ) * 100.0
-                    alternative_rolls["AvgCost"] = alternative_rolls["AvgCost"].replace(
-                        [np.inf, -np.inf], np.nan
-                    ).fillna(0.0)
+            alternative_rolls = pd.concat(
+                [alternative_rolls.reset_index(drop=True), conv_final], axis=1
+            )
 
-            # NetAvgCost = AvgCost × (1 + Waste%)
-            if "AvgCost" in alternative_rolls.columns and "Waste_Pct" in alternative_rolls.columns:
-                alternative_rolls["NetAvgCost"] = (
-                    alternative_rolls["AvgCost"] * (1 + alternative_rolls["Waste_Pct"] / 100.0)
-                )
+        # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
+        if "NetAvgCost" in alternative_rolls.columns and "ConvertingCostPerCWT" in alternative_rolls.columns:
+            alternative_rolls["FinalCostCWT"] = (
+                alternative_rolls["NetAvgCost"].fillna(0.0)
+                + alternative_rolls["ConvertingCostPerCWT"].fillna(0.0)
+            )
 
-            # Conversion metrics (safe: no .tolist())
-            if (
-                not alternative_rolls.empty
-                and paper_info_df is not None
-                and machine_info_df is not None
-            ):
-                conv_series = alternative_rolls.apply(
-                    lambda r: calculate_conversion_cost(
-                        r, requested_width, paper_info_df, machine_info_df
-                    ),
-                    axis=1,
-                )
+        # Drop inventory value column
+        if inv_col and inv_col in alternative_rolls.columns:
+            alternative_rolls = alternative_rolls.drop(columns=[inv_col], errors="ignore")
 
-                if isinstance(conv_series, pd.DataFrame):
-                    conv_final = conv_series.reset_index(drop=True)
-                else:
-                    conv_final = pd.DataFrame(list(conv_series)).reset_index(drop=True)
+    return exact_matches, alternative_rolls, requested_width
 
-                alternative_rolls = pd.concat(
-                    [alternative_rolls.reset_index(drop=True), conv_final], axis=1
-                )
+        # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
+        if "NetAvgCost" in alternative_rolls.columns and "ConvertingCostPerCWT" in alternative_rolls.columns:
+            alternative_rolls["FinalCostCWT"] = (
+                alternative_rolls["NetAvgCost"].fillna(0.0)
+                + alternative_rolls["ConvertingCostPerCWT"].fillna(0.0)
+            )
 
-            # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
-            if "NetAvgCost" in alternative_rolls.columns and "ConvertingCostPerCWT" in alternative_rolls.columns:
-                alternative_rolls["FinalCostCWT"] = (
-                    alternative_rolls["NetAvgCost"].fillna(0.0)
-                    + alternative_rolls["ConvertingCostPerCWT"].fillna(0.0)
-                )
-
-            # Drop inventory value column
-            if inv_col and inv_col in alternative_rolls.columns:
-                alternative_rolls = alternative_rolls.drop(columns=[inv_col], errors="ignore")
+        # Drop inventory value column and temporary Width column
+        if inv_col and inv_col in alternative_rolls.columns:
+            alternative_rolls = alternative_rolls.drop(columns=[inv_col], errors="ignore")
+        if "Width" in alternative_rolls.columns:
+            alternative_rolls = alternative_rolls.drop(columns=["Width"], errors="ignore")
 
     return exact_matches, alternative_rolls, requested_width
 
@@ -605,9 +613,7 @@ if search_btn:
         "caliper": caliper,
         "sheet_width_input": sheet_width_input,
         "sheet_length_input": sheet_length_input,
-        "roll_width_input": roll_width_input,
         "max_waste_pct": max_waste_pct,
-        "max_diameter": max_diameter,
     }
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_idx = set()
@@ -698,14 +704,9 @@ else:
     params = st.session_state.search_params
     sw = params.get("sheet_width_input")
     sl = params.get("sheet_length_input")
-    rw = params.get("roll_width_input")
     
     if sw and sl:
-        st.info(f"No exact matches for sheet dimensions {sw}\" × {sl}\"")
-    elif rw:
-        st.info(f"No exact matches for roll width {rw}\"")
-    elif sw:
-        st.info(f"No exact matches for sheet width {sw}\"")
+        st.info(f"No exact sheet matches for {sw}\" × {sl}\"")
     else:
         st.info("No exact matches found")
 
@@ -713,7 +714,7 @@ else:
 # =========================================================
 # DISPLAY: ALTERNATIVES
 # =========================================================
-st.subheader("✂️ Alternatives (Larger Rolls to Split)")
+st.subheader("✂️ Alternatives (Larger Sheets & Rolls)")
 if not alternative_rolls.empty:
     # Ensure required computed columns exist
     for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT"]:
@@ -833,14 +834,9 @@ else:
     mw = params.get("max_waste_pct", 10.0)
     sw = params.get("sheet_width_input")
     sl = params.get("sheet_length_input")
-    rw = params.get("roll_width_input")
     
     if sw and sl:
         st.info(f"No alternatives within {mw}% waste for sheet dimensions {sw}\" × {sl}\"")
-    elif rw:
-        st.info(f"No alternatives within {mw}% waste for roll width {rw}\"")
-    elif sw:
-        st.info(f"No alternatives within {mw}% waste for sheet width {sw}\"")
     else:
         st.info(f"No alternatives within {mw}% waste")
 
@@ -924,14 +920,10 @@ export_df = pd.concat([selected_exact, selected_alt], ignore_index=True) if (
 if not export_df.empty:
     bw_token = str(basis_wt) if basis_wt != "All" else ""
     
-    # Build dimension token based on what was searched
+    # Build dimension token for sheets
     dim_token = ""
     if sheet_width_input and sheet_length_input:
         dim_token = f"{sheet_width_input}x{sheet_length_input}"
-    elif sheet_width_input:
-        dim_token = f"SW{sheet_width_input}"
-    elif roll_width_input:
-        dim_token = f"RW{roll_width_input}"
     
     fname = "NKQuote.csv"
     if bw_token and dim_token:
