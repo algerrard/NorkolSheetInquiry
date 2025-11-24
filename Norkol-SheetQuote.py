@@ -559,6 +559,9 @@ def run_search(params):
 
         alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
 
+        # Debug what columns we have
+        st.write(f"DEBUG: inv_col = '{inv_col}', columns in alternative_rolls: {list(alternative_rolls.columns)}")
+
 
         # Ensure numeric types for calculations
         if "QtyOnHand" in alternative_rolls.columns:
