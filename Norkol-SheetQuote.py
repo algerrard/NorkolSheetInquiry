@@ -474,6 +474,12 @@ def run_search(params):
             ex[width_col] = pd.to_numeric(ex[width_col], errors="coerce")
         if length_col in ex.columns:
             ex[length_col] = pd.to_numeric(ex[length_col], errors="coerce")
+        
+        # CRITICAL: Convert inventory value to numeric BEFORE groupby
+        # (values may have commas like "2,072.29" which makes them strings)
+        if inv_col and inv_col in ex.columns:
+            ex[inv_col] = ex[inv_col].replace({',': ''}, regex=True)
+            ex[inv_col] = pd.to_numeric(ex[inv_col], errors="coerce")
 
         group_cols_exact = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
         group_cols_exact = [c for c in group_cols_exact if c in ex.columns]
@@ -484,24 +490,11 @@ def run_search(params):
 
         exact_matches = ex.groupby(group_cols_exact, as_index=False).agg(agg_dict_ex)
 
-        # Ensure numeric types for calculations
-        if "QtyOnHand" in exact_matches.columns:
-            exact_matches["QtyOnHand"] = pd.to_numeric(exact_matches["QtyOnHand"], errors="coerce")
-        if inv_col and inv_col in exact_matches.columns:
-            exact_matches[inv_col] = pd.to_numeric(exact_matches[inv_col], errors="coerce")
-
-        # AvgCost = (sum inv) / (sum qty) * 100 - only where we have valid values
+        # AvgCost = (sum inv) / (sum qty) * 100
         if inv_col and inv_col in exact_matches.columns and "QtyOnHand" in exact_matches.columns:
-            with np.errstate(divide="ignore", invalid="ignore"):
-                exact_matches["AvgCost"] = np.nan
-                valid_mask = (
-                    exact_matches[inv_col].notna() & 
-                    exact_matches["QtyOnHand"].notna() & 
-                    (exact_matches["QtyOnHand"] > 0)
-                )
-                exact_matches.loc[valid_mask, "AvgCost"] = (
-                    (exact_matches.loc[valid_mask, inv_col] / exact_matches.loc[valid_mask, "QtyOnHand"]) * 100.0
-                )
+            exact_matches["AvgCost"] = (
+                exact_matches[inv_col] / exact_matches["QtyOnHand"]
+            ) * 100.0
 
         # Drop inventory value column from display
         if inv_col and inv_col in exact_matches.columns:
