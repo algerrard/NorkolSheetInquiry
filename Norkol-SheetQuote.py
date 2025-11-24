@@ -561,6 +561,11 @@ def run_search(params):
 
         # Debug what columns we have
         st.write(f"DEBUG: inv_col = '{inv_col}', columns in alternative_rolls: {list(alternative_rolls.columns)}")
+        
+        # Debug: show InvValue and Yield for first few rows
+        if inv_col in alternative_rolls.columns and "Yield" in alternative_rolls.columns:
+            st.write(f"DEBUG: First 5 rows InvValue: {alternative_rolls[inv_col].head().tolist()}")
+            st.write(f"DEBUG: First 5 rows Yield: {alternative_rolls['Yield'].head().tolist()}")
 
 
         # Ensure numeric types for calculations
