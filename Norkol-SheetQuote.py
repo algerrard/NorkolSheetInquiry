@@ -529,6 +529,12 @@ def run_search(params):
         if "QtyOnHand" in al.columns and "Waste_Pct" in al.columns:
             al["Yield"] = al["QtyOnHand"] * (1 - al["Waste_Pct"] / 100.0)
 
+        # CRITICAL: Convert inventory value to numeric BEFORE groupby
+        # (values may have commas like "2,072.29" which makes them strings)
+        if inv_col and inv_col in al.columns:
+            al[inv_col] = al[inv_col].replace({',': ''}, regex=True)
+            al[inv_col] = pd.to_numeric(al[inv_col], errors="coerce")
+
 
         # Group by common columns
         group_cols_alt = ["GradeName", "BasisWt", "Caliper", "Width", "Mill", "Brand"]
@@ -558,14 +564,6 @@ def run_search(params):
             agg_alt[length_col] = "first"
 
         alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
-
-        # Debug what columns we have
-        st.write(f"DEBUG: inv_col = '{inv_col}', columns in alternative_rolls: {list(alternative_rolls.columns)}")
-        
-        # Debug: show InvValue and Yield for first few rows
-        if inv_col in alternative_rolls.columns and "Yield" in alternative_rolls.columns:
-            st.write(f"DEBUG: First 5 rows InvValue: {alternative_rolls[inv_col].head().tolist()}")
-            st.write(f"DEBUG: First 5 rows Yield: {alternative_rolls['Yield'].head().tolist()}")
 
 
         # Ensure numeric types for calculations
