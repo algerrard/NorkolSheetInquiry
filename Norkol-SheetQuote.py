@@ -112,8 +112,15 @@ def load_supplementary_data():
 # =========================================================
 def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_df):
     """
-    Calculate converting cost metrics for a grouped alternative row.
+    Calculate converting cost metrics for a grouped alternative roll.
     Uses Yield (preferred) or QtyOnHand as processing weight.
+    
+    NumShtrRolls logic:
+    - If caliper > 0.011: NumShtrRolls = 1
+    - Otherwise: NumShtrRolls from PaperInformation table
+    
+    Formula: Lbs/Hour = BasisWt/(Area*500) * (CutWidth * NumCuts * NumShtrRolls) * (AvgSpeed * 12) * 60
+    
     Returns: LbsPerHour, ConvHrs, ConvertingCostPerCWT
     """
     try:
@@ -145,6 +152,7 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         # Inputs
         basis_wt = float(row.get("BasisWt", 0.0) or 0.0)
         basis_uom = row.get("BasisWtUOM", "LB")
+        caliper = float(row.get("Caliper", 0.0) or 0.0)
         area_in = float(paper_row.get("Area(IN)", 0.0) or 0.0)
         avg_speed = float(
             machine_row.get(
@@ -158,7 +166,26 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         )
         hourly_rate = float(machine_row.get("HourlyRate", 273.0) or 273.0)
         roll_change_hrs = float(machine_row.get("Roll_Change_Hrs", 0.25) or 0.25)
-        splits = int(row.get("Splits", 1) or 1)
+        splits = int(row.get("Splits", 1) or 1)  # NumCuts
+
+        # Determine NumShtrRolls based on caliper
+        # If caliper > 0.011, use 1; otherwise lookup from PaperInformation
+        if caliper > 0.011:
+            num_shtr_rolls = 1
+        else:
+            # Get NumShtrRolls from paper_row
+            num_shtr_rolls_val = paper_row.get("NumShtrRolls", None)
+            if num_shtr_rolls_val is not None:
+                try:
+                    num_shtr_rolls = int(float(num_shtr_rolls_val))
+                except (ValueError, TypeError):
+                    num_shtr_rolls = 1
+            else:
+                num_shtr_rolls = 1
+        
+        # Ensure at least 1
+        if num_shtr_rolls < 1:
+            num_shtr_rolls = 1
 
         # Basis weight to LB if needed
         if basis_uom == "GSM":
@@ -172,10 +199,10 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
                 {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
             )
 
-        # Lbs/Hour = BasisWt/(Area*500) * (CutWidth * NumCuts) * (AvgSpeed * 12) * 60
+        # Lbs/Hour = BasisWt/(Area*500) * (CutWidth * NumCuts * NumShtrRolls) * (AvgSpeed * 12) * 60
         lbs_per_hour = (
             (basis_lb / (area_in * 500.0))
-            * (float(requested_width) * splits)
+            * (float(requested_width) * splits * num_shtr_rolls)
             * (avg_speed * 12.0)
             * 60.0
         )
