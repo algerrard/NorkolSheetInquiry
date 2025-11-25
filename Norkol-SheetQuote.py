@@ -117,7 +117,7 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
     try:
         grade_id = str(row.get("GradeID", "")).strip()
         grade_name = str(row.get("GradeName", "")).lower()
-        equip_type = "Sheeter" if "sht" in grade_name else "Rewinder"
+        equip_type = "Sheeter"
 
         # Lookup paper info
         paper_row = None
@@ -999,3 +999,4 @@ if not export_df.empty:
     )
 else:
     st.caption("Select rows above to enable CSV export.")
+
