@@ -565,13 +565,20 @@ def run_search(params):
                 # Get PerCWTRate from the Trimmer row
                 per_cwt_rate = trimmer_row.iloc[0].get("PerCWTRate", None)
                 if per_cwt_rate is not None:
-                    per_cwt_rate = float(per_cwt_rate)
-                    alternative_sheets["ConvertingCostPerCWT"] = per_cwt_rate
-                    # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
-                    if "NetAvgCost" in alternative_sheets.columns:
-                        alternative_sheets["FinalCostCWT"] = (
-                            alternative_sheets["NetAvgCost"].fillna(0.0) + per_cwt_rate
-                        )
+                    # Clean and convert to float (handle $, commas, etc.)
+                    if isinstance(per_cwt_rate, str):
+                        per_cwt_rate = per_cwt_rate.replace('$', '').replace(',', '').strip()
+                    try:
+                        per_cwt_rate = float(per_cwt_rate)
+                        alternative_sheets["ConvertingCostPerCWT"] = per_cwt_rate
+                        # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
+                        if "NetAvgCost" in alternative_sheets.columns:
+                            alternative_sheets["FinalCostCWT"] = (
+                                alternative_sheets["NetAvgCost"].fillna(0.0) + per_cwt_rate
+                            )
+                    except (ValueError, TypeError):
+                        alternative_sheets["ConvertingCostPerCWT"] = np.nan
+                        alternative_sheets["FinalCostCWT"] = np.nan
                 else:
                     alternative_sheets["ConvertingCostPerCWT"] = np.nan
                     alternative_sheets["FinalCostCWT"] = np.nan
