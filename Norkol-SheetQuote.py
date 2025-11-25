@@ -35,8 +35,10 @@ st.set_page_config(page_title="Norkol Sheet Stock Search", page_icon="📦", lay
 # Session state: selections & search params
 if "sel_exact_idx" not in st.session_state:
     st.session_state.sel_exact_idx = set()
-if "sel_alt_idx" not in st.session_state:
-    st.session_state.sel_alt_idx = set()
+if "sel_alt_sheets_idx" not in st.session_state:
+    st.session_state.sel_alt_sheets_idx = set()
+if "sel_alt_rolls_idx" not in st.session_state:
+    st.session_state.sel_alt_rolls_idx = set()
 if "search_params" not in st.session_state:
     st.session_state.search_params = {}
 
@@ -229,7 +231,8 @@ with st.sidebar:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.session_state.sel_exact_idx = set()
-        st.session_state.sel_alt_idx = set()
+        st.session_state.sel_alt_sheets_idx = set()
+        st.session_state.sel_alt_rolls_idx = set()
         st.session_state.search_params = {}
         st.rerun()
     if last_refresh:
@@ -306,7 +309,8 @@ with st.form("search_form"):
 
 if reset_btn:
     st.session_state.sel_exact_idx = set()
-    st.session_state.sel_alt_idx = set()
+    st.session_state.sel_alt_sheets_idx = set()
+    st.session_state.sel_alt_rolls_idx = set()
     st.session_state.search_params = {}
     st.rerun()
 
@@ -501,81 +505,109 @@ def run_search(params):
             exact_matches = exact_matches.drop(columns=[inv_col], errors="ignore")
 
     # =========================================================
-    # PROCESS ALTERNATIVES (alternative sheets + rolls)
+    # PROCESS ALTERNATIVE SHEETS
     # =========================================================
-    alt_combined = pd.concat([alt_sheets, roll_results], ignore_index=True) if (
-        not alt_sheets.empty or not roll_results.empty
-    ) else pd.DataFrame()
-
-    if not alt_combined.empty:
-        al = alt_combined.copy()
-        if "Caliper" in al.columns:
-            al["Caliper"] = pd.to_numeric(al["Caliper"], errors="coerce")
-        
-        # Normalize width column name for grouping
-        if "Roll_Width" in al.columns:
-            al["Width"] = al["Roll_Width"]
-        elif has_sheet_width and width_col in al.columns:
-            al["Width"] = al[width_col]
+    alternative_sheets = pd.DataFrame()
+    
+    if not alt_sheets.empty:
+        al_sh = alt_sheets.copy()
+        if "Caliper" in al_sh.columns:
+            al_sh["Caliper"] = pd.to_numeric(al_sh["Caliper"], errors="coerce")
         
         # Yield = QtyOnHand * (1 - Waste_Pct/100)
-        if "QtyOnHand" in al.columns and "Waste_Pct" in al.columns:
-            al["Yield"] = al["QtyOnHand"] * (1 - al["Waste_Pct"] / 100.0)
+        if "QtyOnHand" in al_sh.columns and "Waste_Pct" in al_sh.columns:
+            al_sh["Yield"] = al_sh["QtyOnHand"] * (1 - al_sh["Waste_Pct"] / 100.0)
 
         # CRITICAL: Convert inventory value to numeric BEFORE groupby
-        # (values may have commas like "2,072.29" which makes them strings)
-        if inv_col and inv_col in al.columns:
-            al[inv_col] = al[inv_col].replace({',': ''}, regex=True)
-            al[inv_col] = pd.to_numeric(al[inv_col], errors="coerce")
+        if inv_col and inv_col in al_sh.columns:
+            al_sh[inv_col] = al_sh[inv_col].replace({',': ''}, regex=True)
+            al_sh[inv_col] = pd.to_numeric(al_sh[inv_col], errors="coerce")
 
-
-        # Group by common columns
-        group_cols_alt = ["GradeName", "BasisWt", "Caliper", "Width", "Mill", "Brand"]
-        group_cols_alt = [c for c in group_cols_alt if c in al.columns]
+        # Group by columns for sheets
+        group_cols_sheets = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
+        group_cols_sheets = [c for c in group_cols_sheets if c in al_sh.columns]
         
-        agg_alt = {
+        agg_sheets = {
             "QtyOnHand": "sum",
             "Yield": "sum",
             "Splits": "first",
             "Waste_Pct": "first",
         }
 
-        if "Units" in al.columns:
-            agg_alt["Units"] = "sum"
-        if inv_col and inv_col in al.columns:
-            agg_alt[inv_col] = "sum"
-        if "GradeID" in al.columns:
-            agg_alt["GradeID"] = "first"
-        if "BasisWtUOM" in al.columns:
-            agg_alt["BasisWtUOM"] = "first"
-        # Keep original width columns for display
-        if "Roll_Width" in al.columns:
-            agg_alt["Roll_Width"] = "first"
-        if has_sheet_width and width_col in al.columns:
-            agg_alt[width_col] = "first"
-        if has_sheet_length and length_col in al.columns:
-            agg_alt[length_col] = "first"
+        if "Units" in al_sh.columns:
+            agg_sheets["Units"] = "sum"
+        if inv_col and inv_col in al_sh.columns:
+            agg_sheets[inv_col] = "sum"
+        if "GradeID" in al_sh.columns:
+            agg_sheets["GradeID"] = "first"
+        if "BasisWtUOM" in al_sh.columns:
+            agg_sheets["BasisWtUOM"] = "first"
 
-        alternative_rolls = al.groupby(group_cols_alt, as_index=False).agg(agg_alt)
+        alternative_sheets = al_sh.groupby(group_cols_sheets, as_index=False).agg(agg_sheets)
 
+        # Calculate costs
+        if inv_col and inv_col in alternative_sheets.columns and "Yield" in alternative_sheets.columns:
+            alternative_sheets["NetAvgCost"] = (
+                alternative_sheets[inv_col] / alternative_sheets["Yield"]
+            ) * 100.0
+            if "QtyOnHand" in alternative_sheets.columns:
+                alternative_sheets["AvgCost"] = (
+                    alternative_sheets[inv_col] / alternative_sheets["QtyOnHand"]
+                ) * 100.0
+        else:
+            alternative_sheets["AvgCost"] = np.nan
+            alternative_sheets["NetAvgCost"] = np.nan
 
-        # Ensure numeric types for calculations
-        if "QtyOnHand" in alternative_rolls.columns:
-            alternative_rolls["QtyOnHand"] = pd.to_numeric(alternative_rolls["QtyOnHand"], errors="coerce")
-        if "Yield" in alternative_rolls.columns:
-            alternative_rolls["Yield"] = pd.to_numeric(alternative_rolls["Yield"], errors="coerce")
-        if inv_col and inv_col in alternative_rolls.columns:
-            alternative_rolls[inv_col] = pd.to_numeric(alternative_rolls[inv_col], errors="coerce")
-        if "Waste_Pct" in alternative_rolls.columns:
-            alternative_rolls["Waste_Pct"] = pd.to_numeric(alternative_rolls["Waste_Pct"], errors="coerce").fillna(0.0)
+        # Drop inventory value column
+        if inv_col and inv_col in alternative_sheets.columns:
+            alternative_sheets = alternative_sheets.drop(columns=[inv_col], errors="ignore")
 
-        # Simple calculation: NetAvgCost = (Total Inventory Value / Yield lbs) * 100 to get $/CWT
+    # =========================================================
+    # PROCESS ALTERNATIVE ROLLS
+    # =========================================================
+    alternative_rolls = pd.DataFrame()
+    
+    if not roll_results.empty:
+        al_rl = roll_results.copy()
+        if "Caliper" in al_rl.columns:
+            al_rl["Caliper"] = pd.to_numeric(al_rl["Caliper"], errors="coerce")
+        
+        # Yield = QtyOnHand * (1 - Waste_Pct/100)
+        if "QtyOnHand" in al_rl.columns and "Waste_Pct" in al_rl.columns:
+            al_rl["Yield"] = al_rl["QtyOnHand"] * (1 - al_rl["Waste_Pct"] / 100.0)
+
+        # CRITICAL: Convert inventory value to numeric BEFORE groupby
+        if inv_col and inv_col in al_rl.columns:
+            al_rl[inv_col] = al_rl[inv_col].replace({',': ''}, regex=True)
+            al_rl[inv_col] = pd.to_numeric(al_rl[inv_col], errors="coerce")
+
+        # Group by columns for rolls
+        group_cols_rolls = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
+        group_cols_rolls = [c for c in group_cols_rolls if c in al_rl.columns]
+        
+        agg_rolls = {
+            "QtyOnHand": "sum",
+            "Yield": "sum",
+            "Splits": "first",
+            "Waste_Pct": "first",
+        }
+
+        if "Units" in al_rl.columns:
+            agg_rolls["Units"] = "sum"
+        if inv_col and inv_col in al_rl.columns:
+            agg_rolls[inv_col] = "sum"
+        if "GradeID" in al_rl.columns:
+            agg_rolls["GradeID"] = "first"
+        if "BasisWtUOM" in al_rl.columns:
+            agg_rolls["BasisWtUOM"] = "first"
+
+        alternative_rolls = al_rl.groupby(group_cols_rolls, as_index=False).agg(agg_rolls)
+
+        # Calculate costs
         if inv_col and inv_col in alternative_rolls.columns and "Yield" in alternative_rolls.columns:
-            # Calculate directly - no intermediate AvgCost needed
             alternative_rolls["NetAvgCost"] = (
                 alternative_rolls[inv_col] / alternative_rolls["Yield"]
             ) * 100.0
-            # Also calculate AvgCost for reference (based on QtyOnHand before waste)
             if "QtyOnHand" in alternative_rolls.columns:
                 alternative_rolls["AvgCost"] = (
                     alternative_rolls[inv_col] / alternative_rolls["QtyOnHand"]
@@ -584,7 +616,7 @@ def run_search(params):
             alternative_rolls["AvgCost"] = np.nan
             alternative_rolls["NetAvgCost"] = np.nan
 
-        # Conversion metrics
+        # Conversion metrics for rolls
         if (
             not alternative_rolls.empty
             and paper_info_df is not None
@@ -617,7 +649,7 @@ def run_search(params):
         if inv_col and inv_col in alternative_rolls.columns:
             alternative_rolls = alternative_rolls.drop(columns=[inv_col], errors="ignore")
 
-    return exact_matches, alternative_rolls, requested_width
+    return exact_matches, alternative_sheets, alternative_rolls, requested_width
 
 
 # =========================================================
@@ -636,14 +668,16 @@ if search_btn:
         "max_waste_pct": max_waste_pct,
     }
     st.session_state.sel_exact_idx = set()
-    st.session_state.sel_alt_idx = set()
+    st.session_state.sel_alt_sheets_idx = set()
+    st.session_state.sel_alt_rolls_idx = set()
 
 exact_matches = pd.DataFrame()
+alternative_sheets = pd.DataFrame()
 alternative_rolls = pd.DataFrame()
 requested_width = None
 
 if st.session_state.search_params:
-    exact_matches, alternative_rolls, requested_width = run_search(st.session_state.search_params)
+    exact_matches, alternative_sheets, alternative_rolls, requested_width = run_search(st.session_state.search_params)
 else:
     st.info("Use the search form above to run a search.")
     st.stop()
@@ -749,71 +783,178 @@ else:
 
 
 # =========================================================
-# DISPLAY: ALTERNATIVES
+# DISPLAY: ALTERNATIVE SHEETS
 # =========================================================
-st.subheader("✂️ Alternatives (Larger Sheets & Rolls)")
-if not alternative_rolls.empty:
+st.subheader("📄 Alternative Sheets")
+if not alternative_sheets.empty:
     # Ensure required computed columns exist
-    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT"]:
-        if c not in alternative_rolls.columns:
-            alternative_rolls[c] = None
+    for c in ["Yield", "AvgCost", "NetAvgCost"]:
+        if c not in alternative_sheets.columns:
+            alternative_sheets[c] = None
 
-    # 18 columns: checkbox, Grade, BasisWt, Caliper, RollWidth, SheetWidth, SheetLength, Mill, Brand, Qty, Splits, Waste%, Yield, NetAvgCost, Lbs/Hr, ConvHrs, Conv$/CWT, FinalCost/CWT
-    ratios = [
+    # 12 columns for sheets: checkbox, Grade, BasisWt, Caliper, SheetWidth, SheetLength, Mill, Brand, Qty, Waste%, Yield, NetAvgCost
+    sheet_ratios = [
         0.5,  # 0 checkbox
-        1.4,  # 1 Grade
-        0.8,  # 2 BasisWt
-        0.8,  # 3 Caliper
-        0.9,  # 4 RollWidth
-        0.9,  # 5 SheetWidth
-        0.9,  # 6 SheetLength
-        0.9,  # 7 Mill
-        0.9,  # 8 Brand
-        1.0,  # 9 Qty
-        0.7,  # 10 Splits
-        0.8,  # 11 Waste%
-        1.0,  # 12 Yield
-        1.0,  # 13 NetAvgCost
-        1.0,  # 14 Lbs/Hr
-        0.9,  # 15 ConvHrs
-        1.0,  # 16 Conv$/CWT
-        1.1   # 17 FinalCost/CWT
+        1.6,  # 1 Grade
+        0.9,  # 2 BasisWt
+        0.9,  # 3 Caliper
+        1.0,  # 4 SheetWidth
+        1.0,  # 5 SheetLength
+        1.0,  # 6 Mill
+        1.0,  # 7 Brand
+        1.1,  # 8 Qty
+        0.9,  # 9 Waste%
+        1.1,  # 10 Yield
+        1.1,  # 11 NetAvgCost
     ]
 
-    # enforce exact length
-    if len(ratios) != 18:
-        raise ValueError(f"Expected 18 ratios, got {len(ratios)}")
-
-    H = st.columns(ratios)
-
-    headers = [
-        "☑", "Grade", "BasisWt", "Caliper", "RollWidth", "SheetWidth", "SheetLength",
-        "Mill", "Brand", "Qty", "Splits", "Waste%", "Yield", "NetAvgCost",
-        "Lbs/Hr", "ConvHrs", "Conv$/CWT", "FinalCost/CWT"
+    H_sh = st.columns(sheet_ratios)
+    sheet_headers = [
+        "☑", "Grade", "BasisWt", "Caliper", "SheetWidth", "SheetLength",
+        "Mill", "Brand", "Qty", "Waste%", "Yield", "NetAvgCost"
     ]
 
-    for i, title in enumerate(headers):
-        with H[i]:
+    for i, title in enumerate(sheet_headers):
+        with H_sh[i]:
             st.markdown(f"**{title}**")
 
     st.markdown("---")
 
-
-    for idx, row in alternative_rolls.iterrows():
-        C = st.columns(ratios)
-        key = f"alt_{idx}"
+    for idx, row in alternative_sheets.iterrows():
+        C = st.columns(sheet_ratios)
+        key = f"alt_sheet_{idx}"
 
         with C[0]:
             checked = st.checkbox(
                 "sel",
                 key=key,
                 label_visibility="collapsed",
-                value=(idx in st.session_state.sel_alt_idx),
+                value=(idx in st.session_state.sel_alt_sheets_idx),
             )
         if checked:
-            st.session_state.sel_alt_idx.add(idx)
+            st.session_state.sel_alt_sheets_idx.add(idx)
         else:
-            st.session_state.sel_alt_idx.discard(idx)
+            st.session_state.sel_alt_sheets_idx.discard(idx)
+
+        with C[1]:  # Grade
+            st.write(row.get('GradeName', ''))
+        with C[2]:  # BasisWt
+            v = row.get('BasisWt')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.0f}" if v is not None else '')
+        with C[3]:  # Caliper
+            v = row.get('Caliper')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.3f}" if v is not None else '')
+        with C[4]:  # SheetWidth
+            v = None
+            for col in ["SheetWidth", "Sheet_Width"]:
+                if col in row.index:
+                    v = row.get(col, None)
+                    break
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.2f}\"" if v is not None else '')
+        with C[5]:  # SheetLength
+            v = None
+            for col in ["SheetLength", "Sheet_Length"]:
+                if col in row.index:
+                    v = row.get(col, None)
+                    break
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.2f}\"" if v is not None else '')
+        with C[6]:  # Mill
+            st.write(row.get('Mill', ''))
+        with C[7]:  # Brand
+            st.write(row.get('Brand', ''))
+        with C[8]:  # QtyOnHand
+            v = row.get('QtyOnHand')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:,.0f}" if v is not None else '')
+        with C[9]:  # Waste%
+            v = row.get('Waste_Pct')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:.1f}%" if v is not None else '')
+        with C[10]:  # Yield
+            v = row.get('Yield')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v:,.0f}" if v is not None else '')
+        with C[11]:  # NetAvgCost
+            v = row.get('NetAvgCost')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"${v:.2f}" if v is not None else '')
+
+    with st.expander("📋 Alternative Sheets Details"):
+        st.dataframe(alternative_sheets, use_container_width=True)
+else:
+    params = st.session_state.search_params
+    mw = params.get("max_waste_pct", 10.0)
+    sw = params.get("sheet_width_input")
+    sl = params.get("sheet_length_input")
+    
+    if sw and sl:
+        st.info(f"No alternative sheets within {mw}% waste for {sw}\" × {sl}\"")
+    else:
+        st.info("No alternative sheets found")
+
+
+# =========================================================
+# DISPLAY: ALTERNATIVE ROLLS
+# =========================================================
+st.subheader("🎞️ Alternative Rolls")
+if not alternative_rolls.empty:
+    # Ensure required computed columns exist
+    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT"]:
+        if c not in alternative_rolls.columns:
+            alternative_rolls[c] = None
+
+    # 15 columns for rolls: checkbox, Grade, BasisWt, Caliper, RollWidth, Mill, Brand, Qty, Splits, Waste%, Yield, NetAvgCost, Lbs/Hr, ConvHrs, Conv$/CWT, FinalCost/CWT
+    roll_ratios = [
+        0.5,  # 0 checkbox
+        1.4,  # 1 Grade
+        0.8,  # 2 BasisWt
+        0.8,  # 3 Caliper
+        0.9,  # 4 RollWidth
+        0.9,  # 5 Mill
+        0.9,  # 6 Brand
+        1.0,  # 7 Qty
+        0.7,  # 8 Splits
+        0.8,  # 9 Waste%
+        1.0,  # 10 Yield
+        1.0,  # 11 NetAvgCost
+        1.0,  # 12 Lbs/Hr
+        0.9,  # 13 ConvHrs
+        1.0,  # 14 Conv$/CWT
+        1.1   # 15 FinalCost/CWT
+    ]
+
+    H_rl = st.columns(roll_ratios)
+    roll_headers = [
+        "☑", "Grade", "BasisWt", "Caliper", "RollWidth",
+        "Mill", "Brand", "Qty", "Splits", "Waste%", "Yield", "NetAvgCost",
+        "Lbs/Hr", "ConvHrs", "Conv$/CWT", "FinalCost/CWT"
+    ]
+
+    for i, title in enumerate(roll_headers):
+        with H_rl[i]:
+            st.markdown(f"**{title}**")
+
+    st.markdown("---")
+
+    for idx, row in alternative_rolls.iterrows():
+        C = st.columns(roll_ratios)
+        key = f"alt_roll_{idx}"
+
+        with C[0]:
+            checked = st.checkbox(
+                "sel",
+                key=key,
+                label_visibility="collapsed",
+                value=(idx in st.session_state.sel_alt_rolls_idx),
+            )
+        if checked:
+            st.session_state.sel_alt_rolls_idx.add(idx)
+        else:
+            st.session_state.sel_alt_rolls_idx.discard(idx)
 
         with C[1]:  # Grade
             st.write(row.get('GradeName', ''))
@@ -829,74 +970,57 @@ if not alternative_rolls.empty:
             v = row.get('Roll_Width')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.2f}\"" if v is not None else '')
-        with C[5]:  # SheetWidth
-            v = None
-            for col in ["SheetWidth", "Sheet_Width", "Width"]:
-                if col in row.index and col != "Roll_Width":
-                    v = row.get(col, None)
-                    break
-            v = float(v) if pd.notna(v) else None
-            st.write(f"{v:.2f}\"" if v is not None else '')
-        with C[6]:  # SheetLength
-            v = None
-            for col in ["SheetLength", "Sheet_Length", "Length"]:
-                if col in row.index:
-                    v = row.get(col, None)
-                    break
-            v = float(v) if pd.notna(v) else None
-            st.write(f"{v:.2f}\"" if v is not None else '')
-        with C[7]:  # Mill
+        with C[5]:  # Mill
             st.write(row.get('Mill', ''))
-        with C[8]:  # Brand
+        with C[6]:  # Brand
             st.write(row.get('Brand', ''))
-        with C[9]:  # QtyOnHand
+        with C[7]:  # QtyOnHand
             v = row.get('QtyOnHand')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[10]:  # Splits
+        with C[8]:  # Splits
             v = row.get('Splits')
             st.write(f"{int(v)}x" if pd.notna(v) else '')
-        with C[11]:  # Waste%
+        with C[9]:  # Waste%
             v = row.get('Waste_Pct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}%" if v is not None else '')
-        with C[12]:  # Yield
+        with C[10]:  # Yield
             v = row.get('Yield')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[13]:  # NetAvgCost
+        with C[11]:  # NetAvgCost
             v = row.get('NetAvgCost')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[14]:  # Lbs/Hr
+        with C[12]:  # Lbs/Hr
             v = row.get('LbsPerHour')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[15]:  # ConvHrs
+        with C[13]:  # ConvHrs
             v = row.get('ConvHrs')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}h" if v is not None else '')
-        with C[16]:  # Conv$/CWT
+        with C[14]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[17]:  # FinalCost/CWT
+        with C[15]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
 
-    with st.expander("📋 Alternative Details"):
+    with st.expander("📋 Alternative Rolls Details"):
         st.dataframe(alternative_rolls, use_container_width=True)
 else:
     params = st.session_state.search_params
     mw = params.get("max_waste_pct", 10.0)
     sw = params.get("sheet_width_input")
-    sl = params.get("sheet_length_input")
     
-    if sw and sl:
-        st.info(f"No alternatives within {mw}% waste for sheet dimensions {sw}\" × {sl}\"")
+    if sw:
+        st.info(f"No alternative rolls within {mw}% waste for width {sw}\"")
     else:
-        st.info(f"No alternatives within {mw}% waste")
+        st.info("No alternative rolls found")
 
 
 # =========================================================
@@ -906,16 +1030,22 @@ st.markdown("---")
 st.subheader("📊 Summary of Selected")
 
 exact_sel_idx_sorted = sorted(list(st.session_state.sel_exact_idx))
-alt_sel_idx_sorted = sorted(list(st.session_state.sel_alt_idx))
+alt_sheets_sel_idx_sorted = sorted(list(st.session_state.sel_alt_sheets_idx))
+alt_rolls_sel_idx_sorted = sorted(list(st.session_state.sel_alt_rolls_idx))
 
 selected_exact = (
     exact_matches.iloc[exact_sel_idx_sorted]
     if (not exact_matches.empty and exact_sel_idx_sorted)
     else pd.DataFrame()
 )
-selected_alt = (
-    alternative_rolls.iloc[alt_sel_idx_sorted]
-    if (not alternative_rolls.empty and alt_sel_idx_sorted)
+selected_alt_sheets = (
+    alternative_sheets.iloc[alt_sheets_sel_idx_sorted]
+    if (not alternative_sheets.empty and alt_sheets_sel_idx_sorted)
+    else pd.DataFrame()
+)
+selected_alt_rolls = (
+    alternative_rolls.iloc[alt_rolls_sel_idx_sorted]
+    if (not alternative_rolls.empty and alt_rolls_sel_idx_sorted)
     else pd.DataFrame()
 )
 
@@ -925,11 +1055,15 @@ if not selected_exact.empty and "QtyOnHand" in selected_exact.columns:
 else:
     total_exact_lbs = 0.0
 
-if not selected_alt.empty and "Yield" in selected_alt.columns:
-    total_alt_yield = selected_alt["Yield"].fillna(0.0).sum()
-else:
-    total_alt_yield = 0.0
+total_alt_sheets_yield = 0.0
+if not selected_alt_sheets.empty and "Yield" in selected_alt_sheets.columns:
+    total_alt_sheets_yield = selected_alt_sheets["Yield"].fillna(0.0).sum()
 
+total_alt_rolls_yield = 0.0
+if not selected_alt_rolls.empty and "Yield" in selected_alt_rolls.columns:
+    total_alt_rolls_yield = selected_alt_rolls["Yield"].fillna(0.0).sum()
+
+total_alt_yield = total_alt_sheets_yield + total_alt_rolls_yield
 total_lbs = total_exact_lbs + total_alt_yield
 
 # Dollar values
@@ -941,15 +1075,21 @@ if not selected_exact.empty and set(["AvgCost", "QtyOnHand"]).issubset(selected_
 else:
     exact_value = 0.0
 
-if not selected_alt.empty and set(["FinalCostCWT", "Yield"]).issubset(selected_alt.columns):
-    alt_value = (
-        (selected_alt["FinalCostCWT"].fillna(0.0) / 100.0)
-        * selected_alt["Yield"].fillna(0.0)
+alt_sheets_value = 0.0
+if not selected_alt_sheets.empty and set(["NetAvgCost", "Yield"]).issubset(selected_alt_sheets.columns):
+    alt_sheets_value = (
+        (selected_alt_sheets["NetAvgCost"].fillna(0.0) / 100.0)
+        * selected_alt_sheets["Yield"].fillna(0.0)
     ).sum()
-else:
-    alt_value = 0.0
 
-total_value = exact_value + alt_value
+alt_rolls_value = 0.0
+if not selected_alt_rolls.empty and set(["FinalCostCWT", "Yield"]).issubset(selected_alt_rolls.columns):
+    alt_rolls_value = (
+        (selected_alt_rolls["FinalCostCWT"].fillna(0.0) / 100.0)
+        * selected_alt_rolls["Yield"].fillna(0.0)
+    ).sum()
+
+total_value = exact_value + alt_sheets_value + alt_rolls_value
 
 if total_lbs > 0:
     blended_cost_cwt = (total_value / total_lbs) * 100.0
@@ -967,12 +1107,12 @@ with c3:
 with c4:
     st.metric("Blended Cost", f"${blended_cost_cwt:,.2f} / CWT")
 
-if not exact_sel_idx_sorted and not alt_sel_idx_sorted:
+if not exact_sel_idx_sorted and not alt_sheets_sel_idx_sorted and not alt_rolls_sel_idx_sorted:
     st.info("No rows selected yet above.")
 
 # CSV Export of selected rows
-export_df = pd.concat([selected_exact, selected_alt], ignore_index=True) if (
-    not selected_exact.empty or not selected_alt.empty
+export_df = pd.concat([selected_exact, selected_alt_sheets, selected_alt_rolls], ignore_index=True) if (
+    not selected_exact.empty or not selected_alt_sheets.empty or not selected_alt_rolls.empty
 ) else pd.DataFrame()
 
 if not export_df.empty:
@@ -999,4 +1139,3 @@ if not export_df.empty:
     )
 else:
     st.caption("Select rows above to enable CSV export.")
-
