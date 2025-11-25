@@ -558,6 +558,30 @@ def run_search(params):
             alternative_sheets["AvgCost"] = np.nan
             alternative_sheets["NetAvgCost"] = np.nan
 
+        # Add Trimmer converting cost for sheets
+        if machine_info_df is not None and "EquipType" in machine_info_df.columns:
+            trimmer_row = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == "Trimmer"]
+            if len(trimmer_row) > 0:
+                # Get PerCWTRate from the Trimmer row
+                per_cwt_rate = trimmer_row.iloc[0].get("PerCWTRate", None)
+                if per_cwt_rate is not None:
+                    per_cwt_rate = float(per_cwt_rate)
+                    alternative_sheets["ConvertingCostPerCWT"] = per_cwt_rate
+                    # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
+                    if "NetAvgCost" in alternative_sheets.columns:
+                        alternative_sheets["FinalCostCWT"] = (
+                            alternative_sheets["NetAvgCost"].fillna(0.0) + per_cwt_rate
+                        )
+                else:
+                    alternative_sheets["ConvertingCostPerCWT"] = np.nan
+                    alternative_sheets["FinalCostCWT"] = np.nan
+            else:
+                alternative_sheets["ConvertingCostPerCWT"] = np.nan
+                alternative_sheets["FinalCostCWT"] = np.nan
+        else:
+            alternative_sheets["ConvertingCostPerCWT"] = np.nan
+            alternative_sheets["FinalCostCWT"] = np.nan
+
         # Drop inventory value column
         if inv_col and inv_col in alternative_sheets.columns:
             alternative_sheets = alternative_sheets.drop(columns=[inv_col], errors="ignore")
@@ -788,30 +812,32 @@ else:
 st.subheader("📄 Alternative Sheets")
 if not alternative_sheets.empty:
     # Ensure required computed columns exist
-    for c in ["Yield", "AvgCost", "NetAvgCost"]:
+    for c in ["Yield", "AvgCost", "NetAvgCost", "ConvertingCostPerCWT", "FinalCostCWT"]:
         if c not in alternative_sheets.columns:
             alternative_sheets[c] = None
 
-    # 12 columns for sheets: checkbox, Grade, BasisWt, Caliper, SheetWidth, SheetLength, Mill, Brand, Qty, Waste%, Yield, NetAvgCost
+    # 14 columns for sheets: checkbox, Grade, BasisWt, Caliper, SheetWidth, SheetLength, Mill, Brand, Qty, Waste%, Yield, NetAvgCost, Conv$/CWT, FinalCost/CWT
     sheet_ratios = [
         0.5,  # 0 checkbox
-        1.6,  # 1 Grade
-        0.9,  # 2 BasisWt
-        0.9,  # 3 Caliper
-        1.0,  # 4 SheetWidth
-        1.0,  # 5 SheetLength
-        1.0,  # 6 Mill
-        1.0,  # 7 Brand
-        1.1,  # 8 Qty
-        0.9,  # 9 Waste%
-        1.1,  # 10 Yield
-        1.1,  # 11 NetAvgCost
+        1.4,  # 1 Grade
+        0.8,  # 2 BasisWt
+        0.8,  # 3 Caliper
+        0.9,  # 4 SheetWidth
+        0.9,  # 5 SheetLength
+        0.9,  # 6 Mill
+        0.9,  # 7 Brand
+        1.0,  # 8 Qty
+        0.8,  # 9 Waste%
+        1.0,  # 10 Yield
+        1.0,  # 11 NetAvgCost
+        1.0,  # 12 Conv$/CWT
+        1.1,  # 13 FinalCost/CWT
     ]
 
     H_sh = st.columns(sheet_ratios)
     sheet_headers = [
         "☑", "Grade", "BasisWt", "Caliper", "SheetWidth", "SheetLength",
-        "Mill", "Brand", "Qty", "Waste%", "Yield", "NetAvgCost"
+        "Mill", "Brand", "Qty", "Waste%", "Yield", "NetAvgCost", "Conv$/CWT", "FinalCost/CWT"
     ]
 
     for i, title in enumerate(sheet_headers):
@@ -880,6 +906,14 @@ if not alternative_sheets.empty:
             st.write(f"{v:,.0f}" if v is not None else '')
         with C[11]:  # NetAvgCost
             v = row.get('NetAvgCost')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"${v:.2f}" if v is not None else '')
+        with C[12]:  # Conv$/CWT
+            v = row.get('ConvertingCostPerCWT')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"${v:.2f}" if v is not None else '')
+        with C[13]:  # FinalCost/CWT
+            v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
 
@@ -1076,9 +1110,9 @@ else:
     exact_value = 0.0
 
 alt_sheets_value = 0.0
-if not selected_alt_sheets.empty and set(["NetAvgCost", "Yield"]).issubset(selected_alt_sheets.columns):
+if not selected_alt_sheets.empty and set(["FinalCostCWT", "Yield"]).issubset(selected_alt_sheets.columns):
     alt_sheets_value = (
-        (selected_alt_sheets["NetAvgCost"].fillna(0.0) / 100.0)
+        (selected_alt_sheets["FinalCostCWT"].fillna(0.0) / 100.0)
         * selected_alt_sheets["Yield"].fillna(0.0)
     ).sum()
 
