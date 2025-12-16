@@ -275,17 +275,6 @@ with st.sidebar:
     st.metric("Total Items", f"{len(df):,}")
     st.success("✅ Paper Info Loaded" if paper_info_df is not None else "⚠️ Paper Info Missing")
     st.success("✅ Machine Info Loaded" if machine_info_df is not None else "⚠️ Machine Info Missing")
-    
-    # DEBUG: Show MachineInfo details
-    if machine_info_df is not None:
-        with st.expander("🔧 MachineInfo Debug"):
-            st.write("**Columns:**", list(machine_info_df.columns))
-            sheeter_rows = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == "Sheeter"]
-            if len(sheeter_rows) > 0:
-                st.write("**Sheeter Row:**")
-                st.dataframe(sheeter_rows)
-            else:
-                st.warning("No Sheeter row found")
 
 # =========================================================
 # MAIN TITLE
