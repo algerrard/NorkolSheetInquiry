@@ -166,6 +166,7 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         )
         hourly_rate = float(machine_row.get("HourlyRate", 273.0) or 273.0)
         roll_change_hrs = float(machine_row.get("Roll_Change_Hrs", 0.25) or 0.25)
+        setup_hrs = float(machine_row.get("Setup_hrs", 0.0) or 0.0)  # Added once per group
         splits = int(row.get("Splits", 1) or 1)  # NumCuts
 
         # Determine NumShtrRolls based on caliper
@@ -218,7 +219,7 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
 
         processing_hours = (process_weight / lbs_per_hour) if (lbs_per_hour and lbs_per_hour > 0) else 0.0
         roll_change_hours = roll_change_hrs * num_rolls
-        total_hours = processing_hours + roll_change_hours
+        total_hours = processing_hours + roll_change_hours + setup_hrs  # Setup added once per group
 
         total_cost = total_hours * hourly_rate
 
