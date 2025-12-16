@@ -166,7 +166,14 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         )
         hourly_rate = float(machine_row.get("HourlyRate", 273.0) or 273.0)
         roll_change_hrs = float(machine_row.get("Roll_Change_Hrs", 0.25) or 0.25)
-        setup_hrs = float(machine_row.get("Setup_hrs", 0.0) or 0.0)  # Added once per group
+        
+        # Setup_hrs - try multiple column name variations
+        setup_hrs = 0.0
+        for col_name in ["Setup_hrs", "Setup_Hrs", "SetupHrs", "setup_hrs", "SETUP_HRS"]:
+            if col_name in machine_row.index:
+                setup_hrs = float(machine_row.get(col_name, 0.0) or 0.0)
+                break
+        
         splits = int(row.get("Splits", 1) or 1)  # NumCuts
 
         # Determine NumShtrRolls based on caliper
@@ -268,6 +275,17 @@ with st.sidebar:
     st.metric("Total Items", f"{len(df):,}")
     st.success("✅ Paper Info Loaded" if paper_info_df is not None else "⚠️ Paper Info Missing")
     st.success("✅ Machine Info Loaded" if machine_info_df is not None else "⚠️ Machine Info Missing")
+    
+    # DEBUG: Show MachineInfo details
+    if machine_info_df is not None:
+        with st.expander("🔧 MachineInfo Debug"):
+            st.write("**Columns:**", list(machine_info_df.columns))
+            sheeter_rows = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == "Sheeter"]
+            if len(sheeter_rows) > 0:
+                st.write("**Sheeter Row:**")
+                st.dataframe(sheeter_rows)
+            else:
+                st.warning("No Sheeter row found")
 
 # =========================================================
 # MAIN TITLE
