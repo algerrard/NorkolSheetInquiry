@@ -305,25 +305,25 @@ with st.form("search_form"):
             product_group = "All"
 
         gn_opts = (
-            ["All"] + sorted(df["GradeName"].dropna().unique().tolist())
+            sorted(df["GradeName"].dropna().unique().tolist())
             if "GradeName" in df.columns
-            else ["All"]
+            else []
         )
-        grade_name = st.selectbox("Grade Name", gn_opts)
+        grade_names = st.multiselect("Grade Name(s)", gn_opts, placeholder="All grades (leave empty)")
 
         bw_opts = (
-            ["All"] + sorted(df["BasisWt"].dropna().unique().tolist())
+            sorted([x for x in df["BasisWt"].dropna().unique().tolist()])
             if "BasisWt" in df.columns
-            else ["All"]
+            else []
         )
-        basis_wt = st.selectbox("Basis Weight", bw_opts)
+        basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)")
 
         if "Caliper" in df.columns:
             caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
-            cal_opts = ["All"] + [f"{x:.3f}" for x in sorted(caliper_values)]
-            caliper = st.selectbox("Caliper", cal_opts)
+            cal_opts = [f"{x:.3f}" for x in sorted(caliper_values)]
+            calipers = st.multiselect("Caliper(s)", cal_opts, placeholder="All calipers (leave empty)")
         else:
-            caliper = "All"
+            calipers = []
 
     with col2:
         sheet_width_input = st.text_input("Sheet Width Needed", placeholder='e.g., 48 or 48.5')
@@ -356,9 +356,9 @@ if reset_btn:
 def run_search(params):
     warehouse_group = params.get("warehouse_group")
     product_group = params.get("product_group")
-    grade_name = params.get("grade_name")
-    basis_wt = params.get("basis_wt")
-    caliper = params.get("caliper")
+    grade_names = params.get("grade_names", [])
+    basis_weights = params.get("basis_weights", [])
+    calipers = params.get("calipers", [])
     sheet_width_input = params.get("sheet_width_input")
     sheet_length_input = params.get("sheet_length_input")
     max_waste_pct = params.get("max_waste_pct")
@@ -375,15 +375,18 @@ def run_search(params):
         elif "ProductGroup" in filtered.columns:
             filtered = filtered[filtered["ProductGroup"] == product_group]
 
-    if "GradeName" in filtered.columns and grade_name != "All":
-        filtered = filtered[filtered["GradeName"] == grade_name]
+    # Multi-select filters: only filter if list is not empty
+    if "GradeName" in filtered.columns and grade_names:
+        filtered = filtered[filtered["GradeName"].isin(grade_names)]
 
-    if "BasisWt" in filtered.columns and basis_wt != "All":
-        filtered = filtered[filtered["BasisWt"] == basis_wt]
+    if "BasisWt" in filtered.columns and basis_weights:
+        filtered = filtered[filtered["BasisWt"].isin(basis_weights)]
 
-    if "Caliper" in filtered.columns and caliper != "All":
+    if "Caliper" in filtered.columns and calipers:
+        # Convert caliper strings back to floats for comparison
+        caliper_floats = [float(c) for c in calipers]
         filtered = filtered[
-            pd.to_numeric(filtered["Caliper"], errors="coerce").round(3) == float(caliper)
+            pd.to_numeric(filtered["Caliper"], errors="coerce").round(3).isin(caliper_floats)
         ]
 
     exact_matches = pd.DataFrame()
@@ -726,9 +729,9 @@ if search_btn:
     st.session_state.search_params = {
         "warehouse_group": warehouse_group,
         "product_group": product_group,
-        "grade_name": grade_name,
-        "basis_wt": basis_wt,
-        "caliper": caliper,
+        "grade_names": grade_names,
+        "basis_weights": basis_weights,
+        "calipers": calipers,
         "sheet_width_input": sheet_width_input,
         "sheet_length_input": sheet_length_input,
         "max_waste_pct": max_waste_pct,
@@ -1192,7 +1195,15 @@ export_df = pd.concat([selected_exact, selected_alt_sheets, selected_alt_rolls],
 ) else pd.DataFrame()
 
 if not export_df.empty:
-    bw_token = str(basis_wt) if basis_wt != "All" else ""
+    # Build basis weight token for filename (use first selected or empty if none/multiple)
+    params = st.session_state.search_params
+    basis_weights_selected = params.get("basis_weights", [])
+    if len(basis_weights_selected) == 1:
+        bw_token = str(basis_weights_selected[0])
+    elif len(basis_weights_selected) > 1:
+        bw_token = "multi"
+    else:
+        bw_token = ""
     
     # Build dimension token for sheets
     dim_token = ""
