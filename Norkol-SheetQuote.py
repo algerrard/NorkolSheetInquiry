@@ -839,7 +839,11 @@ if not exact_matches.empty:
             st.write(f"${v:.2f}" if v is not None else "")
 
     with st.expander("📋 Exact Details"):
-        st.dataframe(exact_matches, use_container_width=True)
+        # Format Caliper to 4 decimal places for display
+        display_exact = exact_matches.copy()
+        if "Caliper" in display_exact.columns:
+            display_exact["Caliper"] = display_exact["Caliper"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "")
+        st.dataframe(display_exact, use_container_width=True)
 else:
     params = st.session_state.search_params
     sw = params.get("sheet_width_input")
@@ -963,7 +967,11 @@ if not alternative_sheets.empty:
             st.write(f"${v:.2f}" if v is not None else '')
 
     with st.expander("📋 Alternative Sheets Details"):
-        st.dataframe(alternative_sheets, use_container_width=True)
+        # Format Caliper to 4 decimal places for display
+        display_alt_sheets = alternative_sheets.copy()
+        if "Caliper" in display_alt_sheets.columns:
+            display_alt_sheets["Caliper"] = display_alt_sheets["Caliper"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "")
+        st.dataframe(display_alt_sheets, use_container_width=True)
 else:
     params = st.session_state.search_params
     mw = params.get("max_waste_pct", 10.0)
@@ -1090,7 +1098,11 @@ if not alternative_rolls.empty:
             st.write(f"${v:.2f}" if v is not None else '')
 
     with st.expander("📋 Alternative Rolls Details"):
-        st.dataframe(alternative_rolls, use_container_width=True)
+        # Format Caliper to 4 decimal places for display
+        display_alt_rolls = alternative_rolls.copy()
+        if "Caliper" in display_alt_rolls.columns:
+            display_alt_rolls["Caliper"] = display_alt_rolls["Caliper"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "")
+        st.dataframe(display_alt_rolls, use_container_width=True)
 else:
     params = st.session_state.search_params
     mw = params.get("max_waste_pct", 10.0)
