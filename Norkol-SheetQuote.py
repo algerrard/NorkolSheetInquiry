@@ -320,7 +320,7 @@ with st.form("search_form"):
 
         if "Caliper" in df.columns:
             caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
-            cal_opts = [f"{x:.3f}" for x in sorted(caliper_values)]
+            cal_opts = [f"{x:.4f}" for x in sorted(caliper_values)]
             calipers = st.multiselect("Caliper(s)", cal_opts, placeholder="All calipers (leave empty)")
         else:
             calipers = []
@@ -386,7 +386,7 @@ def run_search(params):
         # Convert caliper strings back to floats for comparison
         caliper_floats = [float(c) for c in calipers]
         filtered = filtered[
-            pd.to_numeric(filtered["Caliper"], errors="coerce").round(3).isin(caliper_floats)
+            pd.to_numeric(filtered["Caliper"], errors="coerce").round(4).isin(caliper_floats)
         ]
 
     exact_matches = pd.DataFrame()
@@ -806,7 +806,7 @@ if not exact_matches.empty:
         with cols[3]:
             v = row.get("Caliper", None)
             v = float(v) if pd.notna(v) else None
-            st.write(f"{v:.3f}" if v is not None else "")
+            st.write(f"{v:.4f}" if v is not None else "")
         with cols[4]:
             # Try to find sheet width column (dynamically named)
             v = None
@@ -916,7 +916,7 @@ if not alternative_sheets.empty:
         with C[3]:  # Caliper
             v = row.get('Caliper')
             v = float(v) if pd.notna(v) else None
-            st.write(f"{v:.3f}" if v is not None else '')
+            st.write(f"{v:.4f}" if v is not None else '')
         with C[4]:  # SheetWidth
             v = None
             for col in ["SheetWidth", "Sheet_Width"]:
@@ -1044,7 +1044,7 @@ if not alternative_rolls.empty:
         with C[3]:  # Caliper
             v = row.get('Caliper')
             v = float(v) if pd.notna(v) else None
-            st.write(f"{v:.3f}" if v is not None else '')
+            st.write(f"{v:.4f}" if v is not None else '')
         with C[4]:  # RollWidth
             v = row.get('Roll_Width')
             v = float(v) if pd.notna(v) else None
