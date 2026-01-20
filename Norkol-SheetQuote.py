@@ -1245,7 +1245,12 @@ if sheet_width and sheet_length:
                 mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2
 
 # Summary metrics row (always visible – Option A)
-c1, c2, c3, c4, c5 = st.columns(5)
+# Calculate Cost Per M Sheets: (Cost Per CWT / Mweight) * 100
+cost_per_m = None
+if mweight and mweight > 0 and blended_cost_cwt > 0:
+    cost_per_m = (blended_cost_cwt / mweight) * 100
+
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 with c1:
     st.metric("Exact Qty Selected", f"{total_exact_lbs:,.0f} lbs")
 with c2:
@@ -1256,6 +1261,8 @@ with c4:
     st.metric("Mweight", f"{mweight:,.1f} lbs" if mweight is not None else "—")
 with c5:
     st.metric("Blended Cost", f"${blended_cost_cwt:,.2f} / CWT")
+with c6:
+    st.metric("Cost Per M Sheets", f"${cost_per_m:,.2f}" if cost_per_m is not None else "—")
 
 if mweight_error:
     st.error(mweight_error)
