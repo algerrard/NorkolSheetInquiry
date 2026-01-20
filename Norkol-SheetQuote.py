@@ -1188,7 +1188,7 @@ else:
     blended_cost_cwt = 0.0
 
 # Calculate Mweight (lbs per 1000 sheets)
-# Formula: ((Width * Length) / Area(IN)) * Basis Weight * 2
+# Formula: ((Width * Length) / Area(IN)) * Basis Weight in Lbs * 2
 mweight = None
 params = st.session_state.search_params
 sheet_width = params.get("sheet_width_input")
@@ -1201,25 +1201,39 @@ if sheet_width and sheet_length:
     ) else pd.DataFrame()
     
     if not combined_selected.empty:
-        # Get BasisWt from the first selected row
+        # Get BasisWt and BasisWtUOM from the first selected row
         selected_basis_wt = None
+        basis_uom = "LB"
         if "BasisWt" in combined_selected.columns:
             bw_val = combined_selected.iloc[0].get("BasisWt")
             if pd.notna(bw_val):
                 selected_basis_wt = float(bw_val)
+        if "BasisWtUOM" in combined_selected.columns:
+            uom_val = combined_selected.iloc[0].get("BasisWtUOM")
+            if pd.notna(uom_val):
+                basis_uom = str(uom_val).strip().upper()
         
-        # Look up Area(IN) from paper_info_df based on GradeID
+        # Look up Area(IN) and GSM_Factor from paper_info_df based on GradeID
         area_in = None
+        gsm_factor = 3100.0  # Default GSM factor
         if paper_info_df is not None and "Area(IN)" in paper_info_df.columns and "GradeID" in combined_selected.columns:
             grade_id = str(combined_selected.iloc[0].get("GradeID", "")).strip()
             if grade_id:
                 paper_match = paper_info_df[paper_info_df["GradeID"].astype(str).str.strip() == grade_id]
                 if not paper_match.empty:
                     area_in = float(paper_match.iloc[0].get("Area(IN)", 0) or 0)
+                    gsm_factor = float(paper_match.iloc[0].get("GSM_Factor", 3100.0) or 3100.0)
         
-        # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt * 2
-        if area_in and area_in > 0 and selected_basis_wt and selected_basis_wt > 0:
-            mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * selected_basis_wt * 2
+        # Convert basis weight to LBS if needed
+        if selected_basis_wt and selected_basis_wt > 0:
+            if basis_uom == "GSM" and gsm_factor > 0:
+                basis_wt_lbs = selected_basis_wt / gsm_factor
+            else:
+                basis_wt_lbs = selected_basis_wt
+            
+            # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt in LBS * 2
+            if area_in and area_in > 0:
+                mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2
 
 # Summary metrics row (always visible – Option A)
 c1, c2, c3, c4, c5 = st.columns(5)
