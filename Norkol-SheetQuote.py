@@ -1202,47 +1202,49 @@ if sheet_width and sheet_length:
     ) else pd.DataFrame()
     
     if not combined_selected.empty:
-        # Get BasisWt and BasisWtUOM from the first selected row
-        selected_basis_wt = None
-        basis_uom = "LB"
-        grade_name = combined_selected.iloc[0].get("GradeName", "Unknown")
-        
+        # Check if all selected rows have the same BasisWt
         if "BasisWt" in combined_selected.columns:
-            bw_val = combined_selected.iloc[0].get("BasisWt")
-            if pd.notna(bw_val):
-                selected_basis_wt = float(bw_val)
-        if "BasisWtUOM" in combined_selected.columns:
-            uom_val = combined_selected.iloc[0].get("BasisWtUOM")
-            if pd.notna(uom_val):
-                basis_uom = str(uom_val).strip().upper()
-        
-        # Look up Area(IN) and GSM_Factor from paper_info_df based on GradeID
-        area_in = None
-        gsm_factor = None
-        if paper_info_df is not None and "Area(IN)" in paper_info_df.columns and "GradeID" in combined_selected.columns:
-            grade_id = str(combined_selected.iloc[0].get("GradeID", "")).strip()
-            if grade_id:
-                paper_match = paper_info_df[paper_info_df["GradeID"].astype(str).str.strip() == grade_id]
-                if not paper_match.empty:
-                    area_in = float(paper_match.iloc[0].get("Area(IN)", 0) or 0)
-                    gsm_factor_val = paper_match.iloc[0].get("GSM_Factor")
-                    if pd.notna(gsm_factor_val) and float(gsm_factor_val) > 0:
-                        gsm_factor = float(gsm_factor_val)
-        
-        # Convert basis weight to LBS if needed
-        if selected_basis_wt and selected_basis_wt > 0:
-            if basis_uom == "GSM":
-                if gsm_factor and gsm_factor > 0:
-                    basis_wt_lbs = selected_basis_wt / gsm_factor
-                else:
-                    mweight_error = f"No GSM_Factor found for grade {grade_name}"
-                    basis_wt_lbs = None
-            else:
-                basis_wt_lbs = selected_basis_wt
-            
-            # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt in LBS * 2
-            if basis_wt_lbs and area_in and area_in > 0:
-                mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2
+            unique_basis_wts = combined_selected["BasisWt"].dropna().unique()
+            if len(unique_basis_wts) > 1:
+                mweight_error = "Mweight cannot be calculated when non-uniform basis weights are selected"
+            elif len(unique_basis_wts) == 1:
+                # Get BasisWt and BasisWtUOM from the first selected row
+                selected_basis_wt = float(unique_basis_wts[0])
+                basis_uom = "LB"
+                grade_name = combined_selected.iloc[0].get("GradeName", "Unknown")
+                
+                if "BasisWtUOM" in combined_selected.columns:
+                    uom_val = combined_selected.iloc[0].get("BasisWtUOM")
+                    if pd.notna(uom_val):
+                        basis_uom = str(uom_val).strip().upper()
+                
+                # Look up Area(IN) and GSM_Factor from paper_info_df based on GradeID
+                area_in = None
+                gsm_factor = None
+                if paper_info_df is not None and "Area(IN)" in paper_info_df.columns and "GradeID" in combined_selected.columns:
+                    grade_id = str(combined_selected.iloc[0].get("GradeID", "")).strip()
+                    if grade_id:
+                        paper_match = paper_info_df[paper_info_df["GradeID"].astype(str).str.strip() == grade_id]
+                        if not paper_match.empty:
+                            area_in = float(paper_match.iloc[0].get("Area(IN)", 0) or 0)
+                            gsm_factor_val = paper_match.iloc[0].get("GSM_Factor")
+                            if pd.notna(gsm_factor_val) and float(gsm_factor_val) > 0:
+                                gsm_factor = float(gsm_factor_val)
+                
+                # Convert basis weight to LBS if needed
+                if selected_basis_wt and selected_basis_wt > 0:
+                    if basis_uom == "GSM":
+                        if gsm_factor and gsm_factor > 0:
+                            basis_wt_lbs = selected_basis_wt / gsm_factor
+                        else:
+                            mweight_error = f"No GSM_Factor found for grade {grade_name}"
+                            basis_wt_lbs = None
+                    else:
+                        basis_wt_lbs = selected_basis_wt
+                    
+                    # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt in LBS * 2
+                    if basis_wt_lbs and area_in and area_in > 0:
+                        mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2
 
 # Summary metrics row (always visible – Option A)
 # Calculate Cost Per M Sheets: Cost Per CWT * .01 * Mweight
