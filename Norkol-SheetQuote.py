@@ -1187,8 +1187,42 @@ if total_lbs > 0:
 else:
     blended_cost_cwt = 0.0
 
+# Calculate Mweight (lbs per 1000 sheets)
+# Formula: ((Width * Length) / Area(IN)) * Basis Weight * 2
+mweight = None
+params = st.session_state.search_params
+sheet_width = params.get("sheet_width_input")
+sheet_length = params.get("sheet_length_input")
+
+if sheet_width and sheet_length:
+    # Combine all selected rows to get BasisWt and GradeID
+    combined_selected = pd.concat([selected_exact, selected_alt_sheets, selected_alt_rolls], ignore_index=True) if (
+        not selected_exact.empty or not selected_alt_sheets.empty or not selected_alt_rolls.empty
+    ) else pd.DataFrame()
+    
+    if not combined_selected.empty:
+        # Get BasisWt from the first selected row
+        selected_basis_wt = None
+        if "BasisWt" in combined_selected.columns:
+            bw_val = combined_selected.iloc[0].get("BasisWt")
+            if pd.notna(bw_val):
+                selected_basis_wt = float(bw_val)
+        
+        # Look up Area(IN) from paper_info_df based on GradeID
+        area_in = None
+        if paper_info_df is not None and "Area(IN)" in paper_info_df.columns and "GradeID" in combined_selected.columns:
+            grade_id = str(combined_selected.iloc[0].get("GradeID", "")).strip()
+            if grade_id:
+                paper_match = paper_info_df[paper_info_df["GradeID"].astype(str).str.strip() == grade_id]
+                if not paper_match.empty:
+                    area_in = float(paper_match.iloc[0].get("Area(IN)", 0) or 0)
+        
+        # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt * 2
+        if area_in and area_in > 0 and selected_basis_wt and selected_basis_wt > 0:
+            mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * selected_basis_wt * 2
+
 # Summary metrics row (always visible – Option A)
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
     st.metric("Exact Qty Selected", f"{total_exact_lbs:,.0f} lbs")
 with c2:
@@ -1196,6 +1230,8 @@ with c2:
 with c3:
     st.metric("Total Usable Weight", f"{total_lbs:,.0f} lbs")
 with c4:
+    st.metric("Mweight", f"{mweight:,.1f} lbs" if mweight is not None else "—")
+with c5:
     st.metric("Blended Cost", f"${blended_cost_cwt:,.2f} / CWT")
 
 if not exact_sel_idx_sorted and not alt_sheets_sel_idx_sorted and not alt_rolls_sel_idx_sorted:
