@@ -1245,10 +1245,10 @@ if sheet_width and sheet_length:
                 mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2
 
 # Summary metrics row (always visible – Option A)
-# Calculate Cost Per M Sheets: (Cost Per CWT / Mweight) * 100
+# Calculate Cost Per M Sheets: Cost Per CWT * .01 * Mweight
 cost_per_m = None
 if mweight and mweight > 0 and blended_cost_cwt > 0:
-    cost_per_m = (blended_cost_cwt / mweight) * 100
+    cost_per_m = blended_cost_cwt * 0.01 * mweight
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 with c1:
