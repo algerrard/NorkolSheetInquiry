@@ -2,9 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from azure.storage.blob import BlobServiceClient
-from io import StringIO
+from io import StringIO, BytesIO
 from datetime import datetime
 import os
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.units import inch
 
 # =========================================================
 # SHEET SEARCH APPLICATION - November 2025
@@ -248,6 +253,166 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         return pd.Series(
             {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
         )
+
+
+# =========================================================
+# PDF REPORT GENERATION
+# =========================================================
+def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selected_alt_rolls, summary_data):
+    """
+    Generate a PDF quote report with parameters, selected lines, and summary.
+    Returns PDF as bytes.
+    """
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    styles = getSampleStyleSheet()
+    story = []
+    
+    # Title
+    title_style = ParagraphStyle('CustomTitle', parent=styles['Title'], fontSize=18, spaceAfter=20)
+    story.append(Paragraph("Norkol Sheet Stock Quote", title_style))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles['Normal']))
+    story.append(Spacer(1, 20))
+    
+    # Search Parameters Section
+    story.append(Paragraph("Search Parameters", styles['Heading2']))
+    story.append(Spacer(1, 10))
+    
+    # Safely get parameter values
+    basis_wt_list = search_params.get("basis_weights") or []
+    caliper_list = search_params.get("calipers") or []
+    grade_list = search_params.get("grade_names") or []
+    
+    param_data = [
+        ["Warehouse Group:", str(search_params.get("warehouse_group") or "All")],
+        ["Product Group:", str(search_params.get("product_group") or "All")],
+        ["Grade:", ", ".join(str(g) for g in grade_list) if grade_list else "All"],
+        ["Basis Weight:", ", ".join(str(b) for b in basis_wt_list) if basis_wt_list else "All"],
+        ["Caliper:", ", ".join(str(c) for c in caliper_list) if caliper_list else "All"],
+        ["Sheet Width:", f"{search_params.get('sheet_width_input')}\"" if search_params.get("sheet_width_input") else "Not specified"],
+        ["Sheet Length:", f"{search_params.get('sheet_length_input')}\"" if search_params.get("sheet_length_input") else "Not specified"],
+        ["Max Waste %:", f"{search_params.get('max_waste_pct')}%" if search_params.get("max_waste_pct") is not None else "Not specified"],
+    ]
+    
+    param_table = Table(param_data, colWidths=[1.5*inch, 4*inch])
+    param_table.setStyle(TableStyle([
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+    ]))
+    story.append(param_table)
+    story.append(Spacer(1, 20))
+    
+    # Selected Lines Section
+    def add_lines_table(title, df, table_type="exact"):
+        if df.empty:
+            return
+        story.append(Paragraph(title, styles['Heading2']))
+        story.append(Spacer(1, 10))
+        
+        # Select columns to display based on table type
+        if table_type == "exact":
+            display_cols = ['GradeName', 'BasisWt', 'Caliper', 'Sheet_Width', 'Sheet_Length', 'Mill', 'QtyOnHand', 'AvgCost']
+            headers = ['Grade', 'BasisWt', 'Caliper', 'Width', 'Length', 'Mill', 'Qty', 'AvgCost']
+        elif table_type == "alt_sheets":
+            display_cols = ['GradeName', 'BasisWt', 'Caliper', 'Sheet_Width', 'Sheet_Length', 'Mill', 'QtyOnHand', 'Yield', 'Waste_Pct', 'FinalCostCWT']
+            headers = ['Grade', 'BasisWt', 'Caliper', 'Width', 'Length', 'Mill', 'Qty', 'Yield', 'Waste%', 'Final$/CWT']
+        else:  # alt_rolls
+            display_cols = ['GradeName', 'BasisWt', 'Caliper', 'Roll_Width', 'Mill', 'QtyOnHand', 'Yield', 'Splits', 'Waste_Pct', 'FinalCostCWT']
+            headers = ['Grade', 'BasisWt', 'Caliper', 'Width', 'Mill', 'Qty', 'Yield', 'Splits', 'Waste%', 'Final$/CWT']
+        
+        # Filter to existing columns
+        available_cols = [c for c in display_cols if c in df.columns]
+        available_headers = [headers[display_cols.index(c)] for c in available_cols]
+        
+        # Build table data
+        table_data = [available_headers]
+        for _, row in df.iterrows():
+            row_data = []
+            for col in available_cols:
+                val = row.get(col)
+                try:
+                    if val is None or pd.isna(val):
+                        row_data.append('')
+                    elif col in ['QtyOnHand', 'Yield']:
+                        row_data.append(f"{float(val):,.0f}")
+                    elif col in ['BasisWt']:
+                        row_data.append(f"{float(val):.0f}")
+                    elif col in ['Caliper']:
+                        row_data.append(f"{float(val):.4f}")
+                    elif col in ['Roll_Width', 'Sheet_Width', 'Sheet_Length']:
+                        row_data.append(f"{float(val):.2f}")
+                    elif col in ['Waste_Pct']:
+                        row_data.append(f"{float(val):.1f}%")
+                    elif col in ['AvgCost', 'FinalCostCWT']:
+                        row_data.append(f"${float(val):.2f}")
+                    elif col == 'Splits':
+                        row_data.append(f"{int(val)}x")
+                    elif col == 'Mill':
+                        row_data.append(str(val)[:12] if val else '')  # Truncate supplier to 12 chars
+                    elif col == 'GradeName':
+                        row_data.append(str(val)[:15] if val else '')  # Truncate grade to 15 chars
+                    else:
+                        row_data.append(str(val)[:20] if val else '')  # Truncate other long strings
+                except (ValueError, TypeError):
+                    row_data.append('')
+            table_data.append(row_data)
+        
+        # Create table with dynamic column widths
+        col_width = 7.0 * inch / len(available_cols)
+        lines_table = Table(table_data, colWidths=[col_width] * len(available_cols))
+        lines_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        story.append(lines_table)
+        story.append(Spacer(1, 20))
+    
+    add_lines_table("Exact Matches Selected", selected_exact, table_type="exact")
+    add_lines_table("Alternative Sheets Selected", selected_alt_sheets, table_type="alt_sheets")
+    add_lines_table("Alternative Rolls Selected", selected_alt_rolls, table_type="alt_rolls")
+    
+    # Summary Section
+    story.append(Paragraph("Quote Summary", styles['Heading2']))
+    story.append(Spacer(1, 10))
+    
+    exact_lbs = summary_data.get('exact_lbs') or 0
+    alt_yield = summary_data.get('alt_yield') or 0
+    total_lbs = summary_data.get('total_lbs') or 0
+    mweight = summary_data.get('mweight')
+    blended_cwt = summary_data.get('blended_cwt') or 0
+    cost_per_m = summary_data.get('cost_per_m')
+    est_sheets = summary_data.get('est_sheets')
+    
+    summary_table_data = [
+        ["Exact Qty Selected:", f"{exact_lbs:,.0f} lbs"],
+        ["Alt Yield Selected:", f"{alt_yield:,.0f} lbs"],
+        ["Total Usable Weight:", f"{total_lbs:,.0f} lbs"],
+        ["Mweight:", f"{mweight:,.1f} lbs" if mweight else "—"],
+        ["Blended Cost / CWT:", f"${blended_cwt:,.2f}"],
+        ["Cost Per M Sheets:", f"${cost_per_m:,.2f}" if cost_per_m else "—"],
+        ["Estimated Sheets:", f"{est_sheets:,.0f}" if est_sheets else "—"],
+    ]
+    
+    summary_table = Table(summary_table_data, colWidths=[2*inch, 2*inch])
+    summary_table.setStyle(TableStyle([
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+    ]))
+    story.append(summary_table)
+    
+    # Build PDF
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 # =========================================================
@@ -1252,7 +1417,12 @@ cost_per_m = None
 if mweight and mweight > 0 and blended_cost_cwt > 0:
     cost_per_m = blended_cost_cwt * 0.01 * mweight
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+# Calculate Estimated Sheets: (Total Weight / Mweight) * 1000
+est_sheets = None
+if mweight and mweight > 0 and total_lbs > 0:
+    est_sheets = (total_lbs / mweight) * 1000
+
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 with c1:
     st.metric("Exact Qty Selected", f"{total_exact_lbs:,.0f} lbs")
 with c2:
@@ -1265,6 +1435,8 @@ with c5:
     st.metric("Blended Cost", f"${blended_cost_cwt:,.2f} / CWT")
 with c6:
     st.metric("Cost Per M Sheets", f"${cost_per_m:,.2f}" if cost_per_m is not None else "—")
+with c7:
+    st.metric("Est. Sheets", f"{est_sheets:,.0f}" if est_sheets is not None else "—")
 
 if mweight_error:
     st.error(mweight_error)
@@ -1294,18 +1466,54 @@ if not export_df.empty:
         dim_token = f"{sheet_width_input}x{sheet_length_input}"
     
     fname = "NKQuote.csv"
+    pdf_fname = "NKQuote.pdf"
     if bw_token and dim_token:
         fname = f"NKQuote_{bw_token}_{dim_token}.csv"
+        pdf_fname = f"NKQuote_{bw_token}_{dim_token}.pdf"
     elif bw_token:
         fname = f"NKQuote_{bw_token}.csv"
+        pdf_fname = f"NKQuote_{bw_token}.pdf"
     elif dim_token:
         fname = f"NKQuote_{dim_token}.csv"
+        pdf_fname = f"NKQuote_{dim_token}.pdf"
 
-    st.download_button(
-        "💾 Export Selected to CSV",
-        export_df.to_csv(index=False).encode("utf-8"),
-        file_name=fname,
-        mime="text/csv",
-    )
+    # Export buttons side by side
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
+    
+    with btn_col1:
+        st.download_button(
+            "💾 Export to CSV",
+            export_df.to_csv(index=False).encode("utf-8"),
+            file_name=fname,
+            mime="text/csv",
+        )
+    
+    with btn_col2:
+        # Gather summary data for PDF
+        summary_data = {
+            "exact_lbs": total_exact_lbs,
+            "alt_yield": total_alt_yield,
+            "total_lbs": total_lbs,
+            "mweight": mweight,
+            "blended_cwt": blended_cost_cwt,
+            "cost_per_m": cost_per_m,
+            "est_sheets": est_sheets,
+        }
+        
+        # Generate PDF
+        pdf_bytes = generate_quote_pdf(
+            st.session_state.search_params,
+            selected_exact,
+            selected_alt_sheets,
+            selected_alt_rolls,
+            summary_data
+        )
+        
+        st.download_button(
+            "📄 Export to PDF",
+            pdf_bytes,
+            file_name=pdf_fname,
+            mime="application/pdf",
+        )
 else:
-    st.caption("Select rows above to enable CSV export.")
+    st.caption("Select rows above to enable export.")
