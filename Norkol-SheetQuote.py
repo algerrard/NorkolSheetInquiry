@@ -694,6 +694,10 @@ def run_search(params):
         agg_dict_ex = {"QtyOnHand": "sum"}
         if inv_col and inv_col in ex.columns:
             agg_dict_ex[inv_col] = "sum"
+        if "GradeID" in ex.columns:
+            agg_dict_ex["GradeID"] = "first"
+        if "BasisWtUOM" in ex.columns:
+            agg_dict_ex["BasisWtUOM"] = "first"
 
         exact_matches = ex.groupby(group_cols_exact, as_index=False).agg(agg_dict_ex)
 
