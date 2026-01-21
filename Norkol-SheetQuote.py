@@ -394,7 +394,7 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Exact Qty Selected:", f"{exact_lbs:,.0f} lbs"],
         ["Alt Yield Selected:", f"{alt_yield:,.0f} lbs"],
         ["Total Usable Weight:", f"{total_lbs:,.0f} lbs"],
-        ["Mweight:", f"{mweight:,.1f} lbs" if mweight else "—"],
+        ["Mweight:", f"{mweight:,.0f} lbs" if mweight else "—"],
         ["Blended Cost / CWT:", f"${blended_cwt:,.2f}"],
         ["Cost Per M Sheets:", f"${cost_per_m:,.2f}" if cost_per_m else "—"],
         ["Estimated Sheets:", f"{est_sheets:,.0f}" if est_sheets else "—"],
@@ -1413,15 +1413,15 @@ if sheet_width and sheet_length:
                     
                     # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt in LBS * 2
                     if basis_wt_lbs and area_in and area_in > 0:
-                        mweight = ((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2
+                        mweight = round(((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2)
 
 # Summary metrics row (always visible – Option A)
-# Calculate Cost Per M Sheets: Cost Per CWT * .01 * Mweight
+# Calculate Cost Per M Sheets: Cost Per CWT * .01 * Mweight (using rounded Mweight)
 cost_per_m = None
 if mweight and mweight > 0 and blended_cost_cwt > 0:
     cost_per_m = blended_cost_cwt * 0.01 * mweight
 
-# Calculate Estimated Sheets: (Total Weight / Mweight) * 1000
+# Calculate Estimated Sheets: (Total Weight / Mweight) * 1000 (using rounded Mweight)
 est_sheets = None
 if mweight and mweight > 0 and total_lbs > 0:
     est_sheets = (total_lbs / mweight) * 1000
@@ -1434,7 +1434,7 @@ with c2:
 with c3:
     st.metric("Total Usable Weight", f"{total_lbs:,.0f} lbs")
 with c4:
-    st.metric("Mweight", f"{mweight:,.1f} lbs" if mweight is not None else "—")
+    st.metric("Mweight", f"{mweight:,.0f} lbs" if mweight is not None else "—")
 with c5:
     st.metric("Blended Cost", f"${blended_cost_cwt:,.2f} / CWT")
 with c6:
