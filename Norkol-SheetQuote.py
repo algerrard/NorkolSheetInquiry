@@ -67,6 +67,7 @@ CONTAINER_NAME = "data"
 BLOB_NAME = "Inventory/Norkol_Inventory"
 PAPER_INFO_BLOB = "PaperInformation.csv"
 MACHINE_INFO_BLOB = "MachineInfo.csv"
+ORDER_SIZE_ADJ_BLOB = "NI Order Size Adjustment.csv"
 
 # =========================================================
 # DATA LOADING
@@ -112,10 +113,60 @@ def load_supplementary_data():
         return None, None
 
 
+@st.cache_data(ttl=3600)
+def load_order_size_adjustments():
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+        blob_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=ORDER_SIZE_ADJ_BLOB)
+        csv_content = blob_client.download_blob().readall().decode("utf-8")
+        order_size_adj_df = pd.read_csv(StringIO(csv_content))
+        order_size_adj_df.columns = order_size_adj_df.columns.str.strip()
+        return order_size_adj_df
+    except Exception as e:
+        st.warning(f"Could not load order size adjustments: {str(e)}")
+        return None
+
+
+# =========================================================
+# ORDER SIZE ADJUSTMENT LOOKUP
+# =========================================================
+def get_order_size_pct(adj_df, process, description, order_qty):
+    """Look up order size adjustment percentage. Returns decimal (e.g. 0.03 for 3%)."""
+    if adj_df is None or order_qty is None:
+        return 0.0
+
+    process_map = {"Rewinder": "Rewinding", "Sheeter": "Sheeting"}
+    process_name = process_map.get(process, process)
+
+    mask = (adj_df["Process"].str.strip() == process_name) & (adj_df["Description"].str.strip() == description)
+    matches = adj_df[mask]
+    if matches.empty:
+        return 0.0
+
+    row = matches.iloc[0]
+
+    if order_qty < 5000:
+        col = "Qty 0-4999 lbs"
+    elif order_qty < 10000:
+        col = "Qty 5000-9999 lbs"
+    elif order_qty < 20000:
+        col = "Qty 10000-19999"
+    else:
+        col = "Qty > 19999"
+
+    val = row.get(col, "0%")
+    if isinstance(val, str):
+        val = val.strip().rstrip("%")
+    try:
+        return float(val) / 100.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
 # =========================================================
 # CONVERTING COST CALCULATION
 # =========================================================
-def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_df):
+def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_df, order_quantity=None, order_size_adj_df=None):
     """
     Calculate converting cost metrics for a grouped alternative roll.
     Uses Yield (preferred) or QtyOnHand as processing weight.
@@ -241,6 +292,11 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
             else None
         )
 
+        # Apply OrderQty surcharge from order size adjustments
+        if conv_cwt is not None and order_quantity is not None and order_size_adj_df is not None:
+            order_qty_pct = get_order_size_pct(order_size_adj_df, equip_type, "OrderQty", order_quantity)
+            conv_cwt *= (1 + order_qty_pct)
+
         return pd.Series(
             {
                 "LbsPerHour": lbs_per_hour,
@@ -292,6 +348,7 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Sheet Width:", f"{search_params.get('sheet_width_input')}\"" if search_params.get("sheet_width_input") else "Not specified"],
         ["Sheet Length:", f"{search_params.get('sheet_length_input')}\"" if search_params.get("sheet_length_input") else "Not specified"],
         ["Max Waste %:", f"{search_params.get('max_waste_pct')}%" if search_params.get("max_waste_pct") is not None else "Not specified"],
+        ["Order Quantity:", f"{search_params.get('order_quantity'):,} lbs" if search_params.get("order_quantity") else "Not specified"],
     ]
     
     param_table = Table(param_data, colWidths=[1.5*inch, 4*inch])
@@ -420,6 +477,7 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
 # =========================================================
 df, last_refresh = load_inventory_data()
 paper_info_df, machine_info_df = load_supplementary_data()
+order_size_adj_df = load_order_size_adjustments()
 if df is None:
     st.stop()
 
@@ -440,6 +498,7 @@ with st.sidebar:
     st.metric("Total Items", f"{len(df):,}")
     st.success("✅ Paper Info Loaded" if paper_info_df is not None else "⚠️ Paper Info Missing")
     st.success("✅ Machine Info Loaded" if machine_info_df is not None else "⚠️ Machine Info Missing")
+    st.success("✅ Order Size Adj Loaded" if order_size_adj_df is not None else "⚠️ Order Size Adj Missing")
 
 # =========================================================
 # MAIN TITLE
@@ -500,6 +559,11 @@ with st.form("search_form"):
             value=10.0,
             step=1.0,
         )
+        order_quantity = st.number_input(
+            "Order Quantity (lbs) *",
+            min_value=0,
+            value=0,
+        )
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -527,6 +591,11 @@ def run_search(params):
     sheet_width_input = params.get("sheet_width_input")
     sheet_length_input = params.get("sheet_length_input")
     max_waste_pct = params.get("max_waste_pct")
+    order_quantity = params.get("order_quantity")
+
+    if not order_quantity:
+        st.error("Order quantity in lbs must be provided")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None
 
     filtered = df.copy()
 
@@ -765,6 +834,20 @@ def run_search(params):
             alternative_sheets["AvgCost"] = np.nan
             alternative_sheets["NetAvgCost"] = np.nan
 
+        # Apply RunWaste from order size adjustments
+        if order_quantity is not None and order_size_adj_df is not None:
+            run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
+            alternative_sheets["RunWastePct"] = run_waste_pct
+
+            if "Yield" in alternative_sheets.columns:
+                alternative_sheets["Yield"] = (
+                    alternative_sheets["Yield"] * (1 - run_waste_pct)
+                )
+            if "NetAvgCost" in alternative_sheets.columns:
+                alternative_sheets["NetAvgCost"] = (
+                    alternative_sheets["NetAvgCost"] * (1 + run_waste_pct)
+                )
+
         # Add Trimmer converting cost for sheets
         if machine_info_df is not None and "EquipType" in machine_info_df.columns:
             trimmer_row = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == "Trimmer"]
@@ -777,6 +860,10 @@ def run_search(params):
                         per_cwt_rate = per_cwt_rate.replace('$', '').replace(',', '').strip()
                     try:
                         per_cwt_rate = float(per_cwt_rate)
+                        # Apply OrderQty surcharge to converting rate
+                        if order_quantity is not None and order_size_adj_df is not None:
+                            order_qty_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "OrderQty", order_quantity)
+                            per_cwt_rate *= (1 + order_qty_pct)
                         alternative_sheets["ConvertingCostPerCWT"] = per_cwt_rate
                         # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
                         if "NetAvgCost" in alternative_sheets.columns:
@@ -854,6 +941,20 @@ def run_search(params):
             alternative_rolls["AvgCost"] = np.nan
             alternative_rolls["NetAvgCost"] = np.nan
 
+        # Apply RunWaste from order size adjustments
+        if order_quantity is not None and order_size_adj_df is not None:
+            run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
+            alternative_rolls["RunWastePct"] = run_waste_pct
+
+            if "Yield" in alternative_rolls.columns:
+                alternative_rolls["Yield"] = (
+                    alternative_rolls["Yield"] * (1 - run_waste_pct)
+                )
+            if "NetAvgCost" in alternative_rolls.columns:
+                alternative_rolls["NetAvgCost"] = (
+                    alternative_rolls["NetAvgCost"] * (1 + run_waste_pct)
+                )
+
         # Conversion metrics for rolls
         if (
             not alternative_rolls.empty
@@ -862,7 +963,8 @@ def run_search(params):
         ):
             conv_series = alternative_rolls.apply(
                 lambda r: calculate_conversion_cost(
-                    r, requested_width, paper_info_df, machine_info_df
+                    r, requested_width, paper_info_df, machine_info_df,
+                    order_quantity=order_quantity, order_size_adj_df=order_size_adj_df
                 ),
                 axis=1,
             )
@@ -904,6 +1006,7 @@ if search_btn:
         "sheet_width_input": sheet_width_input,
         "sheet_length_input": sheet_length_input,
         "max_waste_pct": max_waste_pct,
+        "order_quantity": order_quantity,
     }
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_sheets_idx = set()
@@ -1030,11 +1133,11 @@ else:
 st.subheader("📄 Alternative Sheets")
 if not alternative_sheets.empty:
     # Ensure required computed columns exist
-    for c in ["Yield", "AvgCost", "NetAvgCost", "ConvertingCostPerCWT", "FinalCostCWT"]:
+    for c in ["Yield", "AvgCost", "NetAvgCost", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct"]:
         if c not in alternative_sheets.columns:
             alternative_sheets[c] = None
 
-    # 14 columns for sheets: checkbox, Grade, BasisWt, Caliper, SheetWidth, SheetLength, Mill, Brand, Qty, Waste%, Yield, NetAvgCost, Conv$/CWT, FinalCost/CWT
+    # 15 columns for sheets
     sheet_ratios = [
         0.5,  # 0 checkbox
         1.4,  # 1 Grade
@@ -1046,16 +1149,17 @@ if not alternative_sheets.empty:
         0.9,  # 7 Brand
         1.0,  # 8 Qty
         0.8,  # 9 Waste%
-        1.0,  # 10 Yield
-        1.0,  # 11 NetAvgCost
-        1.0,  # 12 Conv$/CWT
-        1.1,  # 13 FinalCost/CWT
+        0.8,  # 10 RunW%
+        1.0,  # 11 Yield
+        1.0,  # 12 NetAvgCost
+        1.0,  # 13 Conv$/CWT
+        1.1,  # 14 FinalCost/CWT
     ]
 
     H_sh = st.columns(sheet_ratios)
     sheet_headers = [
         "☑", "Grade", "BasisWt", "Caliper", "SheetWidth", "SheetLength",
-        "Mill", "Brand", "Qty", "Waste%", "Yield", "NetAvgCost", "Conv$/CWT", "FinalCost/CWT"
+        "Mill", "Brand", "Qty", "Waste%", "RunW%", "Yield", "NetAvgCost", "Conv$/CWT", "FinalCost/CWT"
     ]
 
     for i, title in enumerate(sheet_headers):
@@ -1118,19 +1222,23 @@ if not alternative_sheets.empty:
             v = row.get('Waste_Pct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}%" if v is not None else '')
-        with C[10]:  # Yield
+        with C[10]:  # RunW%
+            v = row.get('RunWastePct')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v * 100:.0f}%" if v is not None and v > 0 else '—')
+        with C[11]:  # Yield
             v = row.get('Yield')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[11]:  # NetAvgCost
+        with C[12]:  # NetAvgCost
             v = row.get('NetAvgCost')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[12]:  # Conv$/CWT
+        with C[13]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[13]:  # FinalCost/CWT
+        with C[14]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
@@ -1159,11 +1267,11 @@ else:
 st.subheader("🎞️ Alternative Rolls")
 if not alternative_rolls.empty:
     # Ensure required computed columns exist
-    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT"]:
+    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct"]:
         if c not in alternative_rolls.columns:
             alternative_rolls[c] = None
 
-    # 15 columns for rolls: checkbox, Grade, BasisWt, Caliper, RollWidth, Mill, Brand, Qty, Splits, Waste%, Yield, NetAvgCost, Lbs/Hr, ConvHrs, Conv$/CWT, FinalCost/CWT
+    # 17 columns for rolls
     roll_ratios = [
         0.5,  # 0 checkbox
         1.4,  # 1 Grade
@@ -1175,18 +1283,19 @@ if not alternative_rolls.empty:
         1.0,  # 7 Qty
         0.7,  # 8 Splits
         0.8,  # 9 Waste%
-        1.0,  # 10 Yield
-        1.0,  # 11 NetAvgCost
-        1.0,  # 12 Lbs/Hr
-        0.9,  # 13 ConvHrs
-        1.0,  # 14 Conv$/CWT
-        1.1   # 15 FinalCost/CWT
+        0.8,  # 10 RunW%
+        1.0,  # 11 Yield
+        1.0,  # 12 NetAvgCost
+        1.0,  # 13 Lbs/Hr
+        0.9,  # 14 ConvHrs
+        1.0,  # 15 Conv$/CWT
+        1.1   # 16 FinalCost/CWT
     ]
 
     H_rl = st.columns(roll_ratios)
     roll_headers = [
         "☑", "Grade", "BasisWt", "Caliper", "RollWidth",
-        "Mill", "Brand", "Qty", "Splits", "Waste%", "Yield", "NetAvgCost",
+        "Mill", "Brand", "Qty", "Splits", "Waste%", "RunW%", "Yield", "NetAvgCost",
         "Lbs/Hr", "ConvHrs", "Conv$/CWT", "FinalCost/CWT"
     ]
 
@@ -1241,27 +1350,31 @@ if not alternative_rolls.empty:
             v = row.get('Waste_Pct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}%" if v is not None else '')
-        with C[10]:  # Yield
+        with C[10]:  # RunW%
+            v = row.get('RunWastePct')
+            v = float(v) if pd.notna(v) else None
+            st.write(f"{v * 100:.0f}%" if v is not None and v > 0 else '—')
+        with C[11]:  # Yield
             v = row.get('Yield')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[11]:  # NetAvgCost
+        with C[12]:  # NetAvgCost
             v = row.get('NetAvgCost')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[12]:  # Lbs/Hr
+        with C[13]:  # Lbs/Hr
             v = row.get('LbsPerHour')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[13]:  # ConvHrs
+        with C[14]:  # ConvHrs
             v = row.get('ConvHrs')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}h" if v is not None else '')
-        with C[14]:  # Conv$/CWT
+        with C[15]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[15]:  # FinalCost/CWT
+        with C[16]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
