@@ -68,6 +68,7 @@ BLOB_NAME = "Inventory/Norkol_Inventory"
 PAPER_INFO_BLOB = "PaperInformation.csv"
 MACHINE_INFO_BLOB = "MachineInfo.csv"
 ORDER_SIZE_ADJ_BLOB = "NI Order Size Adjustment.csv"
+PO_DETAIL_BLOB = "SODetail"
 
 # =========================================================
 # DATA LOADING
@@ -124,6 +125,30 @@ def load_order_size_adjustments():
         return order_size_adj_df
     except Exception as e:
         st.warning(f"Could not load order size adjustments: {str(e)}")
+        return None
+
+
+@st.cache_data(ttl=3600)
+def load_po_detail():
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+        blob_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=PO_DETAIL_BLOB)
+        csv_content = blob_client.download_blob().readall().decode("utf-8")
+        po_df = pd.read_csv(StringIO(csv_content), on_bad_lines="skip", encoding="utf-8")
+        po_df.columns = po_df.columns.str.strip()
+        for col in ["BasisWt", "Caliper", "Roll_Width", "Price", "WeightLB"]:
+            if col in po_df.columns:
+                po_df[col] = pd.to_numeric(po_df[col], errors="coerce")
+        if "GradeID" in po_df.columns:
+            po_df["GradeID"] = (
+                pd.to_numeric(po_df["GradeID"], errors="coerce")
+                .fillna(0).astype(int).astype(str).str.strip()
+            )
+        if "PODate" in po_df.columns:
+            po_df["PODate"] = pd.to_datetime(po_df["PODate"], errors="coerce")
+        return po_df
+    except Exception as e:
+        st.warning(f"Could not load PO detail data: {str(e)}")
         return None
 
 
@@ -478,6 +503,7 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
 df, last_refresh = load_inventory_data()
 paper_info_df, machine_info_df = load_supplementary_data()
 order_size_adj_df = load_order_size_adjustments()
+po_detail_df = load_po_detail()
 if df is None:
     st.stop()
 
@@ -499,6 +525,7 @@ with st.sidebar:
     st.success("✅ Paper Info Loaded" if paper_info_df is not None else "⚠️ Paper Info Missing")
     st.success("✅ Machine Info Loaded" if machine_info_df is not None else "⚠️ Machine Info Missing")
     st.success("✅ Order Size Adj Loaded" if order_size_adj_df is not None else "⚠️ Order Size Adj Missing")
+    st.success("✅ PO Detail Loaded" if po_detail_df is not None else "⚠️ PO Detail Missing")
 
 # =========================================================
 # MAIN TITLE
@@ -1634,3 +1661,87 @@ if not export_df.empty:
         )
 else:
     st.caption("Select rows above to enable export.")
+
+# =========================================================
+# RECENT SALES ORDERS
+# =========================================================
+if po_detail_df is not None and not po_detail_df.empty:
+    # Collect unique GradeIDs from all search results
+    grade_ids = set()
+
+    # From alternative_rolls: GradeID is directly available
+    if not alternative_rolls.empty and "GradeID" in alternative_rolls.columns:
+        grade_ids.update(
+            alternative_rolls["GradeID"].dropna().astype(str).str.strip().tolist()
+        )
+
+    # From alternative_sheets: GradeID is directly available
+    if not alternative_sheets.empty and "GradeID" in alternative_sheets.columns:
+        grade_ids.update(
+            alternative_sheets["GradeID"].dropna().astype(str).str.strip().tolist()
+        )
+
+    # From exact_matches: look up GradeID via GradeName from paper_info_df
+    if not exact_matches.empty and "GradeName" in exact_matches.columns:
+        if "GradeID" in exact_matches.columns:
+            grade_ids.update(
+                exact_matches["GradeID"].dropna().astype(str).str.strip().tolist()
+            )
+        elif paper_info_df is not None:
+            for gn in exact_matches["GradeName"].dropna().unique():
+                match = paper_info_df[paper_info_df["GradeName"].astype(str).str.strip() == str(gn).strip()]
+                if not match.empty and "GradeID" in match.columns:
+                    grade_ids.update(
+                        match["GradeID"].dropna().astype(str).str.strip().tolist()
+                    )
+
+    if grade_ids and "GradeID" in po_detail_df.columns:
+        po_filtered = po_detail_df[
+            po_detail_df["GradeID"].astype(str).str.strip().isin(grade_ids)
+        ].copy()
+
+        if not po_filtered.empty:
+            po_filtered = po_filtered.sort_values("PODate", ascending=False)
+
+            display_cols = ["PODate", "Customer", "GradeName", "BasisWt", "Caliper", "Roll_Width", "WeightLB", "Price"]
+            available = [c for c in display_cols if c in po_filtered.columns]
+            po_display = po_filtered[available].copy()
+
+            rename_map = {
+                "PODate": "Date",
+                "Customer": "Customer Name",
+                "GradeName": "Grade Name",
+                "BasisWt": "Basis Wt",
+                "Caliper": "Caliper",
+                "Roll_Width": "Roll Wd",
+                "WeightLB": "Order Qty (lbs)",
+                "Price": "Price",
+            }
+            po_display = po_display.rename(columns={c: rename_map[c] for c in available if c in rename_map})
+
+            st.markdown("---")
+            st.subheader("📋 Recent Sales Orders")
+
+            col_config = {}
+            if "Date" in po_display.columns:
+                col_config["Date"] = st.column_config.DateColumn("Date", format="YYYY-MM-DD")
+            if "Order Qty (lbs)" in po_display.columns:
+                col_config["Order Qty (lbs)"] = st.column_config.NumberColumn("Order Qty (lbs)", format="%.0f")
+            if "Price" in po_display.columns:
+                col_config["Price"] = st.column_config.NumberColumn("Price", format="$%.2f")
+            if "Basis Wt" in po_display.columns:
+                col_config["Basis Wt"] = st.column_config.NumberColumn("Basis Wt", format="%d")
+            if "Caliper" in po_display.columns:
+                col_config["Caliper"] = st.column_config.NumberColumn("Caliper", format="%.3f")
+            if "Roll Wd" in po_display.columns:
+                col_config["Roll Wd"] = st.column_config.NumberColumn("Roll Wd", format="%.2f")
+
+            st.dataframe(po_display, use_container_width=True, hide_index=True, column_config=col_config)
+        else:
+            st.markdown("---")
+            st.subheader("📋 Recent Sales Orders")
+            st.info("No recent sales order data found for the matching grades.")
+    else:
+        st.markdown("---")
+        st.subheader("📋 Recent Sales Orders")
+        st.info("No recent sales order data found for the matching grades.")
