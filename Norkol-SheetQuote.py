@@ -1703,7 +1703,7 @@ if po_detail_df is not None and not po_detail_df.empty:
         if not po_filtered.empty:
             po_filtered = po_filtered.sort_values("PODate", ascending=False)
 
-            display_cols = ["PODate", "Customer", "GradeName", "BasisWt", "Caliper", "SheetSize", "WeightLB", "MWeight", "PriceCWT"]
+            display_cols = ["PODate", "Customer", "GradeName", "BasisWt", "Caliper", "SheetSize", "MWeight", "WeightLB", "PriceCWT"]
             available = [c for c in display_cols if c in po_filtered.columns]
             po_display = po_filtered[available].copy()
 
