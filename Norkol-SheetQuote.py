@@ -861,18 +861,22 @@ def run_search(params):
             alternative_sheets["AvgCost"] = np.nan
             alternative_sheets["NetAvgCost"] = np.nan
 
-        # Apply RunWaste from order size adjustments
+        # Apply RunWaste from order size adjustments (per-row based on machine type)
         if order_quantity is not None and order_size_adj_df is not None:
-            run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
-            alternative_sheets["RunWastePct"] = run_waste_pct
+            def _get_run_waste_sheets(row):
+                gn = str(row.get("GradeName", "")).lower()
+                equip = "Sheeter" if "sht" in gn else "Rewinder"
+                return get_order_size_pct(order_size_adj_df, equip, "RunWaste", order_quantity)
+
+            alternative_sheets["RunWastePct"] = alternative_sheets.apply(_get_run_waste_sheets, axis=1)
 
             if "Yield" in alternative_sheets.columns:
                 alternative_sheets["Yield"] = (
-                    alternative_sheets["Yield"] * (1 - run_waste_pct)
+                    alternative_sheets["Yield"] * (1 - alternative_sheets["RunWastePct"])
                 )
             if "NetAvgCost" in alternative_sheets.columns:
                 alternative_sheets["NetAvgCost"] = (
-                    alternative_sheets["NetAvgCost"] * (1 + run_waste_pct)
+                    alternative_sheets["NetAvgCost"] * (1 + alternative_sheets["RunWastePct"])
                 )
 
         # Add Trimmer converting cost for sheets
@@ -968,18 +972,22 @@ def run_search(params):
             alternative_rolls["AvgCost"] = np.nan
             alternative_rolls["NetAvgCost"] = np.nan
 
-        # Apply RunWaste from order size adjustments
+        # Apply RunWaste from order size adjustments (per-row based on machine type)
         if order_quantity is not None and order_size_adj_df is not None:
-            run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
-            alternative_rolls["RunWastePct"] = run_waste_pct
+            def _get_run_waste_rolls(row):
+                gn = str(row.get("GradeName", "")).lower()
+                equip = "Sheeter" if "sht" in gn else "Rewinder"
+                return get_order_size_pct(order_size_adj_df, equip, "RunWaste", order_quantity)
+
+            alternative_rolls["RunWastePct"] = alternative_rolls.apply(_get_run_waste_rolls, axis=1)
 
             if "Yield" in alternative_rolls.columns:
                 alternative_rolls["Yield"] = (
-                    alternative_rolls["Yield"] * (1 - run_waste_pct)
+                    alternative_rolls["Yield"] * (1 - alternative_rolls["RunWastePct"])
                 )
             if "NetAvgCost" in alternative_rolls.columns:
                 alternative_rolls["NetAvgCost"] = (
-                    alternative_rolls["NetAvgCost"] * (1 + run_waste_pct)
+                    alternative_rolls["NetAvgCost"] * (1 + alternative_rolls["RunWastePct"])
                 )
 
         # Conversion metrics for rolls
