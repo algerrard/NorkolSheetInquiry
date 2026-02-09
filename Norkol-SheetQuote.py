@@ -136,7 +136,7 @@ def load_po_detail():
         csv_content = blob_client.download_blob().readall().decode("utf-8")
         po_df = pd.read_csv(StringIO(csv_content), on_bad_lines="skip", encoding="utf-8")
         po_df.columns = po_df.columns.str.strip()
-        for col in ["BasisWt", "Caliper", "Roll_Width", "Price", "WeightLB"]:
+        for col in ["BasisWt", "Caliper", "Roll_Width", "Price", "PriceCWT", "WeightLB", "MWeight"]:
             if col in po_df.columns:
                 po_df[col] = pd.to_numeric(po_df[col], errors="coerce")
         if "GradeID" in po_df.columns:
@@ -1703,7 +1703,7 @@ if po_detail_df is not None and not po_detail_df.empty:
         if not po_filtered.empty:
             po_filtered = po_filtered.sort_values("PODate", ascending=False)
 
-            display_cols = ["PODate", "Customer", "GradeName", "BasisWt", "Caliper", "Roll_Width", "WeightLB", "Price"]
+            display_cols = ["PODate", "Customer", "GradeName", "BasisWt", "Caliper", "SheetSize", "WeightLB", "MWeight", "PriceCWT"]
             available = [c for c in display_cols if c in po_filtered.columns]
             po_display = po_filtered[available].copy()
 
@@ -1713,9 +1713,10 @@ if po_detail_df is not None and not po_detail_df.empty:
                 "GradeName": "Grade Name",
                 "BasisWt": "Basis Wt",
                 "Caliper": "Caliper",
-                "Roll_Width": "Roll Wd",
+                "SheetSize": "Sheet Size",
                 "WeightLB": "Order Qty (lbs)",
-                "Price": "Price",
+                "MWeight": "MWeight",
+                "PriceCWT": "Price/CWT",
             }
             po_display = po_display.rename(columns={c: rename_map[c] for c in available if c in rename_map})
 
@@ -1727,14 +1728,14 @@ if po_detail_df is not None and not po_detail_df.empty:
                 col_config["Date"] = st.column_config.DateColumn("Date", format="YYYY-MM-DD")
             if "Order Qty (lbs)" in po_display.columns:
                 col_config["Order Qty (lbs)"] = st.column_config.NumberColumn("Order Qty (lbs)", format="%.0f")
-            if "Price" in po_display.columns:
-                col_config["Price"] = st.column_config.NumberColumn("Price", format="$%.2f")
+            if "MWeight" in po_display.columns:
+                col_config["MWeight"] = st.column_config.NumberColumn("MWeight", format="%.0f")
+            if "Price/CWT" in po_display.columns:
+                col_config["Price/CWT"] = st.column_config.NumberColumn("Price/CWT", format="$%.2f")
             if "Basis Wt" in po_display.columns:
                 col_config["Basis Wt"] = st.column_config.NumberColumn("Basis Wt", format="%d")
             if "Caliper" in po_display.columns:
                 col_config["Caliper"] = st.column_config.NumberColumn("Caliper", format="%.3f")
-            if "Roll Wd" in po_display.columns:
-                col_config["Roll Wd"] = st.column_config.NumberColumn("Roll Wd", format="%.2f")
 
             st.dataframe(po_display, use_container_width=True, hide_index=True, column_config=col_config)
         else:
