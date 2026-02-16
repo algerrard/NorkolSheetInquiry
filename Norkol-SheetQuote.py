@@ -1323,7 +1323,7 @@ if not alternative_sheets.empty:
 
                 col_config = {}
                 if "QtyOnHand" in detail_display.columns:
-                    col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%,.0f")
+                    col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%.0f")
                 if "BasisWt" in detail_display.columns:
                     col_config["BasisWt"] = st.column_config.NumberColumn("BasisWt", format="%d")
                 if "Caliper" in detail_display.columns:
@@ -1503,7 +1503,7 @@ if not alternative_rolls.empty:
 
                 col_config = {}
                 if "QtyOnHand" in detail_display.columns:
-                    col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%,.0f")
+                    col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%.0f")
                 if "BasisWt" in detail_display.columns:
                     col_config["BasisWt"] = st.column_config.NumberColumn("BasisWt", format="%d")
                 if "Caliper" in detail_display.columns:
