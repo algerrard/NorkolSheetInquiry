@@ -322,17 +322,28 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
             order_qty_pct = get_order_size_pct(order_size_adj_df, equip_type, "OrderQty", order_quantity)
             conv_cwt *= (1 + order_qty_pct)
 
+        # Minimum 1 hour charge: if total cost after all surcharges is below
+        # the hourly rate, bump conv_cwt up to the 1-hour minimum
+        min_charge_applied = False
+        if conv_cwt is not None and process_weight and process_weight > 0:
+            min_cost = hourly_rate  # 1 hour minimum
+            final_total_cost = (conv_cwt / 100.0) * process_weight
+            if final_total_cost < min_cost:
+                conv_cwt = (min_cost / process_weight) * 100.0
+                min_charge_applied = True
+
         return pd.Series(
             {
                 "LbsPerHour": lbs_per_hour,
                 "ConvHrs": total_hours,
                 "ConvertingCostPerCWT": conv_cwt,
+                "MinChargeApplied": min_charge_applied,
             }
         )
 
     except Exception:
         return pd.Series(
-            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
+            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None, "MinChargeApplied": False}
         )
 
 
@@ -622,7 +633,7 @@ def run_search(params):
 
     if not order_quantity:
         st.error("Order quantity in lbs must be provided")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None, pd.DataFrame(), pd.DataFrame()
 
     filtered = df.copy()
 
@@ -658,7 +669,7 @@ def run_search(params):
     # Both width and length are required for search
     if not sheet_width_input or not sheet_length_input:
         st.warning("⚠️ Please enter both Sheet Width and Sheet Length to search")
-        return exact_matches, alternative_rolls, None
+        return exact_matches, pd.DataFrame(), alternative_rolls, None, pd.DataFrame(), pd.DataFrame()
 
     # Parse sheet dimensions
     try:
@@ -666,7 +677,7 @@ def run_search(params):
         requested_length = float(str(sheet_length_input).strip())
     except ValueError:
         st.error("❌ Please enter valid numbers for Sheet Width and Length")
-        return exact_matches, alternative_rolls, None
+        return exact_matches, pd.DataFrame(), alternative_rolls, None, pd.DataFrame(), pd.DataFrame()
 
     # Inventory value column
     inv_col = None
@@ -1016,7 +1027,7 @@ def run_search(params):
         if inv_col and inv_col in alternative_rolls.columns:
             alternative_rolls = alternative_rolls.drop(columns=[inv_col], errors="ignore")
 
-    return exact_matches, alternative_sheets, alternative_rolls, requested_width
+    return exact_matches, alternative_sheets, alternative_rolls, requested_width, alt_sheets, roll_results
 
 
 # =========================================================
@@ -1042,10 +1053,12 @@ if search_btn:
 exact_matches = pd.DataFrame()
 alternative_sheets = pd.DataFrame()
 alternative_rolls = pd.DataFrame()
+alt_sheets_raw = pd.DataFrame()
+alt_rolls_raw = pd.DataFrame()
 requested_width = None
 
 if st.session_state.search_params:
-    exact_matches, alternative_sheets, alternative_rolls, requested_width = run_search(st.session_state.search_params)
+    exact_matches, alternative_sheets, alternative_rolls, requested_width, alt_sheets_raw, alt_rolls_raw = run_search(st.session_state.search_params)
 else:
     st.info("Use the search form above to run a search.")
     st.stop()
@@ -1270,12 +1283,59 @@ if not alternative_sheets.empty:
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
 
-    with st.expander("📋 Alternative Sheets Details"):
-        # Format Caliper to 4 decimal places for display
-        display_alt_sheets = alternative_sheets.copy()
-        if "Caliper" in display_alt_sheets.columns:
-            display_alt_sheets["Caliper"] = display_alt_sheets["Caliper"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "")
-        st.dataframe(display_alt_sheets, use_container_width=True)
+    with st.expander("📋 Alternative Sheets Details — Underlying Inventory"):
+        sel_sh_idx = sorted(list(st.session_state.sel_alt_sheets_idx))
+        if sel_sh_idx and not alt_sheets_raw.empty:
+            selected_groups = alternative_sheets.iloc[sel_sh_idx]
+            # Determine sheet width/length column names dynamically
+            sh_group_keys = ["GradeName", "BasisWt", "Caliper", "Mill", "Brand"]
+            for col in ["SheetWidth", "Sheet_Width", "Width"]:
+                if col in alt_sheets_raw.columns and col in selected_groups.columns:
+                    sh_group_keys.append(col)
+                    break
+            for col in ["SheetLength", "Sheet_Length", "Length"]:
+                if col in alt_sheets_raw.columns and col in selected_groups.columns:
+                    sh_group_keys.append(col)
+                    break
+            available_keys = [k for k in sh_group_keys if k in alt_sheets_raw.columns and k in selected_groups.columns]
+
+            detail_rows = alt_sheets_raw.merge(
+                selected_groups[available_keys].drop_duplicates(),
+                on=available_keys,
+                how="inner",
+            )
+
+            if not detail_rows.empty:
+                if "InvValue" in detail_rows.columns and "QtyOnHand" in detail_rows.columns:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        detail_rows["CostPerCWT"] = (
+                            detail_rows["InvValue"] / detail_rows["QtyOnHand"]
+                        ) * 100.0
+                        detail_rows["CostPerCWT"] = detail_rows["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
+
+                inv_display_cols = [
+                    "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "SheetWidth", "SheetLength", "Condition", "Mill", "Brand",
+                    "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
+                ]
+                available_display = [c for c in inv_display_cols if c in detail_rows.columns]
+                detail_display = detail_rows[available_display].copy()
+
+                col_config = {}
+                if "QtyOnHand" in detail_display.columns:
+                    col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%,.0f")
+                if "BasisWt" in detail_display.columns:
+                    col_config["BasisWt"] = st.column_config.NumberColumn("BasisWt", format="%d")
+                if "Caliper" in detail_display.columns:
+                    col_config["Caliper"] = st.column_config.NumberColumn("Caliper", format="%.4f")
+                if "CostPerCWT" in detail_display.columns:
+                    col_config["CostPerCWT"] = st.column_config.NumberColumn("Cost/CWT", format="$%.2f")
+
+                st.dataframe(detail_display, use_container_width=True, hide_index=True, column_config=col_config)
+            else:
+                st.info("No underlying inventory rows found for the selected alternatives.")
+        else:
+            st.info("Select alternative sheet rows above to see underlying inventory detail.")
 else:
     params = st.session_state.search_params
     mw = params.get("max_waste_pct", 10.0)
@@ -1294,7 +1354,7 @@ else:
 st.subheader("🎞️ Alternative Rolls")
 if not alternative_rolls.empty:
     # Ensure required computed columns exist
-    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct"]:
+    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct", "MinChargeApplied"]:
         if c not in alternative_rolls.columns:
             alternative_rolls[c] = None
 
@@ -1400,18 +1460,66 @@ if not alternative_rolls.empty:
         with C[15]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
-            st.write(f"${v:.2f}" if v is not None else '')
+            is_min = row.get('MinChargeApplied')
+            suffix = " *" if is_min else ""
+            st.write(f"${v:.2f}{suffix}" if v is not None else '')
         with C[16]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
 
-    with st.expander("📋 Alternative Rolls Details"):
-        # Format Caliper to 4 decimal places for display
-        display_alt_rolls = alternative_rolls.copy()
-        if "Caliper" in display_alt_rolls.columns:
-            display_alt_rolls["Caliper"] = display_alt_rolls["Caliper"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "")
-        st.dataframe(display_alt_rolls, use_container_width=True)
+    # Footnote if any rows have minimum charge applied
+    if alternative_rolls["MinChargeApplied"].any():
+        st.caption("* Minimum 1-hour converting charge applied")
+
+    with st.expander("📋 Alternative Rolls Details — Underlying Inventory"):
+        sel_rl_idx = sorted(list(st.session_state.sel_alt_rolls_idx))
+        if sel_rl_idx and not alt_rolls_raw.empty:
+            selected_groups = alternative_rolls.iloc[sel_rl_idx]
+            group_keys = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
+            available_keys = [k for k in group_keys if k in alt_rolls_raw.columns and k in selected_groups.columns]
+
+            detail_rows = alt_rolls_raw.merge(
+                selected_groups[available_keys].drop_duplicates(),
+                on=available_keys,
+                how="inner",
+            )
+
+            if not detail_rows.empty:
+                if "InvValue" in detail_rows.columns and "QtyOnHand" in detail_rows.columns:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        detail_rows["CostPerCWT"] = (
+                            detail_rows["InvValue"] / detail_rows["QtyOnHand"]
+                        ) * 100.0
+                        detail_rows["CostPerCWT"] = detail_rows["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
+
+                inv_display_cols = [
+                    "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "Roll_Width", "Diameter", "Condition", "Mill", "Brand",
+                    "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
+                ]
+                available_display = [c for c in inv_display_cols if c in detail_rows.columns]
+                detail_display = detail_rows[available_display].copy()
+
+                col_config = {}
+                if "QtyOnHand" in detail_display.columns:
+                    col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%,.0f")
+                if "BasisWt" in detail_display.columns:
+                    col_config["BasisWt"] = st.column_config.NumberColumn("BasisWt", format="%d")
+                if "Caliper" in detail_display.columns:
+                    col_config["Caliper"] = st.column_config.NumberColumn("Caliper", format="%.4f")
+                if "Roll_Width" in detail_display.columns:
+                    col_config["Roll_Width"] = st.column_config.NumberColumn("Roll_Width", format="%.2f")
+                if "Diameter" in detail_display.columns:
+                    col_config["Diameter"] = st.column_config.NumberColumn("Diameter", format="%.0f")
+                if "CostPerCWT" in detail_display.columns:
+                    col_config["CostPerCWT"] = st.column_config.NumberColumn("Cost/CWT", format="$%.2f")
+
+                st.dataframe(detail_display, use_container_width=True, hide_index=True, column_config=col_config)
+            else:
+                st.info("No underlying inventory rows found for the selected alternatives.")
+        else:
+            st.info("Select alternative roll rows above to see underlying inventory detail.")
 else:
     params = st.session_state.search_params
     mw = params.get("max_waste_pct", 10.0)
