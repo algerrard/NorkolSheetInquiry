@@ -258,19 +258,40 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         splits = int(row.get("Splits", 1) or 1)  # NumCuts
 
         # Determine NumShtrRolls based on caliper
-        # If caliper > 0.011, use 1; otherwise lookup from PaperInformation
+        # If caliper > 0.011 (board grade): NumShtrRolls = 1
+        # Otherwise: lookup from PaperInformation by ProductCategoryID + GSM_Factor
         if caliper > 0.011:
             num_shtr_rolls = 1
         else:
-            # Get NumShtrRolls from paper_row
-            num_shtr_rolls_val = paper_row.get("NumShtrRolls", None)
-            if num_shtr_rolls_val is not None:
-                try:
-                    num_shtr_rolls = int(float(num_shtr_rolls_val))
-                except (ValueError, TypeError):
-                    num_shtr_rolls = 1
+            # Join on ProductCategoryID (from inventory row) + GSM_Factor (from paper_row)
+            prod_cat = str(row.get("ProductCategoryID", "")).strip()
+            gsm_factor_key = paper_row.get("GSM_Factor")
+            num_shtr_rolls = 1  # default
+            if (
+                prod_cat
+                and gsm_factor_key is not None
+                and not pd.isna(gsm_factor_key)
+                and paper_info_df is not None
+                and "ProductCategoryID" in paper_info_df.columns
+                and "GSM_Factor" in paper_info_df.columns
+                and "NumShtrRolls" in paper_info_df.columns
+            ):
+                nsr_matches = paper_info_df[
+                    (paper_info_df["ProductCategoryID"].astype(str).str.strip() == prod_cat)
+                    & (paper_info_df["GSM_Factor"] == float(gsm_factor_key))
+                    & (paper_info_df["NumShtrRolls"].notna())
+                    & (paper_info_df["NumShtrRolls"] > 0)
+                ]
+                if not nsr_matches.empty:
+                    num_shtr_rolls = int(float(nsr_matches.iloc[0]["NumShtrRolls"]))
             else:
-                num_shtr_rolls = 1
+                # Fallback to paper_row's NumShtrRolls if ProductCategoryID not available
+                num_shtr_rolls_val = paper_row.get("NumShtrRolls", None)
+                if num_shtr_rolls_val is not None:
+                    try:
+                        num_shtr_rolls = int(float(num_shtr_rolls_val))
+                    except (ValueError, TypeError):
+                        num_shtr_rolls = 1
         
         # Ensure at least 1
         if num_shtr_rolls < 1:
@@ -963,6 +984,8 @@ def run_search(params):
             agg_rolls["GradeID"] = "first"
         if "BasisWtUOM" in al_rl.columns:
             agg_rolls["BasisWtUOM"] = "first"
+        if "ProductCategoryID" in al_rl.columns:
+            agg_rolls["ProductCategoryID"] = "first"
 
         alternative_rolls = al_rl.groupby(group_cols_rolls, as_index=False).agg(agg_rolls)
 
