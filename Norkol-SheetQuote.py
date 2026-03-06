@@ -67,6 +67,7 @@ CONTAINER_NAME = "data"
 BLOB_NAME = "Inventory/Norkol_Inventory"
 PAPER_INFO_BLOB = "PaperInformation.csv"
 MACHINE_INFO_BLOB = "MachineInfo.csv"
+GRADE_TABLE_BLOB = "Grade"
 ORDER_SIZE_ADJ_BLOB = "NI Order Size Adjustment.csv"
 PO_DETAIL_BLOB = "SODetail"
 
@@ -94,24 +95,31 @@ def load_supplementary_data():
     try:
         blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
 
-        # PaperInformation
+        # Grade table (GradeID -> Area(IN), GSM, ProductGroupID)
+        grade_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=GRADE_TABLE_BLOB)
+        grade_csv = grade_client.download_blob().readall().decode("utf-8")
+        grade_df = pd.read_csv(StringIO(grade_csv))
+        grade_df["GradeID"] = grade_df["GradeID"].astype(str).str.strip()
+        grade_df["ProductGroupID"] = grade_df["ProductGroupID"].astype(str).str.strip()
+        grade_df["GSM"] = pd.to_numeric(grade_df["GSM"], errors="coerce")
+        grade_df["Area(IN)"] = pd.to_numeric(grade_df["Area(IN)"], errors="coerce")
+
+        # PaperInformation (ProductGroupID + GSM_Factor -> RunAdjust, NumShtrRolls, etc.)
         paper_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=PAPER_INFO_BLOB)
         paper_csv = paper_client.download_blob().readall().decode("utf-8")
         paper_df = pd.read_csv(StringIO(paper_csv))
-        if "GradeID" in paper_df.columns:
-            paper_df["GradeID"] = (
-                paper_df["GradeID"].astype(str).str.strip().str.replace(r"\s+", "", regex=True)
-            )
+        paper_df["ProductGroupID"] = paper_df["ProductGroupID"].astype(str).str.strip()
+        paper_df["GSM_Factor"] = pd.to_numeric(paper_df["GSM_Factor"], errors="coerce")
 
         # MachineInfo
         machine_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=MACHINE_INFO_BLOB)
         machine_csv = machine_client.download_blob().readall().decode("utf-8")
         machine_df = pd.read_csv(StringIO(machine_csv))
 
-        return paper_df, machine_df
+        return grade_df, paper_df, machine_df
     except Exception as e:
         st.warning(f"Could not load supplementary data: {str(e)}")
-        return None, None
+        return None, None, None
 
 
 @st.cache_data(ttl=3600)
@@ -191,17 +199,22 @@ def get_order_size_pct(adj_df, process, description, order_qty):
 # =========================================================
 # CONVERTING COST CALCULATION
 # =========================================================
-def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_df, order_quantity=None, order_size_adj_df=None):
+def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, machine_info_df, order_quantity=None, order_size_adj_df=None):
     """
     Calculate converting cost metrics for a grouped alternative roll.
     Uses Yield (preferred) or QtyOnHand as processing weight.
-    
+
+    Data sources:
+    - Grade table: GradeID -> Area(IN), GSM, ProductGroupID
+    - PaperInformation: ProductGroupID + GSM_Factor -> RunAdjust, NumShtrRolls
+    - MachineInfo: EquipType -> AvgSpeed, HourlyRate, Roll_Change_Hrs, Setup_Hrs
+
     NumShtrRolls logic:
     - If caliper > 0.011: NumShtrRolls = 1
     - Otherwise: NumShtrRolls from PaperInformation table
-    
+
     Formula: Lbs/Hour = BasisWt/(Area*500) * (CutWidth * NumCuts * NumShtrRolls) * (AvgSpeed * 12) * 60
-    
+
     Returns: LbsPerHour, ConvHrs, ConvertingCostPerCWT
     """
     try:
@@ -209,15 +222,24 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         grade_name = str(row.get("GradeName", "")).lower()
         equip_type = "Sheeter"
 
-        # Lookup paper info
+        # Lookup grade info (Area(IN), GSM, ProductGroupID) from Grade table
+        grade_row = None
+        if grade_df is not None and grade_id and grade_id != "nan":
+            gr = grade_df[grade_df["GradeID"] == grade_id]
+            if not gr.empty:
+                grade_row = gr.iloc[0]
+
+        # Lookup paper info (RunAdjust, NumShtrRolls) via ProductGroupID + GSM from Grade table
         paper_row = None
-        if (
-            paper_info_df is not None
-            and "GradeID" in paper_info_df.columns
-            and grade_id
-        ):
-            pr = paper_info_df[paper_info_df["GradeID"].astype(str).str.strip() == grade_id]
-            paper_row = pr.iloc[0] if len(pr) else None
+        if grade_row is not None and paper_info_df is not None:
+            prod_group_id = str(grade_row["ProductGroupID"]).strip()
+            gsm_val = float(grade_row["GSM"]) if pd.notna(grade_row["GSM"]) else 0.0
+            pr = paper_info_df[
+                (paper_info_df["ProductGroupID"] == prod_group_id)
+                & (paper_info_df["GSM_Factor"] == gsm_val)
+            ]
+            if not pr.empty:
+                paper_row = pr.iloc[0]
 
         # Lookup machine info
         machine_row = None
@@ -225,7 +247,7 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
             mr = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == equip_type]
             machine_row = mr.iloc[0] if len(mr) else None
 
-        if paper_row is None or machine_row is None:
+        if grade_row is None or paper_row is None or machine_row is None:
             return pd.Series(
                 {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
             )
@@ -234,7 +256,7 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
         basis_wt = float(row.get("BasisWt", 0.0) or 0.0)
         basis_uom = row.get("BasisWtUOM", "LB")
         caliper = float(row.get("Caliper", 0.0) or 0.0)
-        area_in = float(paper_row.get("Area(IN)", 0.0) or 0.0)
+        area_in = float(grade_row.get("Area(IN)", 0.0) or 0.0)
         avg_speed = float(
             machine_row.get(
                 "AvgSpeed(FPM)",
@@ -246,60 +268,40 @@ def calculate_conversion_cost(row, requested_width, paper_info_df, machine_info_
             or 2200.0
         )
         hourly_rate = float(machine_row.get("HourlyRate", 273.0) or 273.0)
-        roll_change_hrs = float(machine_row.get("Roll_Change_Hrs", 0.25) or 0.25)
-        
+        # Roll_Change_Hrs: explicit check so 0.0 is not treated as falsy
+        rc_val = machine_row.get("Roll_Change_Hrs")
+        roll_change_hrs = 0.25 if (rc_val is None or pd.isna(rc_val)) else float(rc_val)
+
         # Setup_hrs - try multiple column name variations
         setup_hrs = 0.0
         for col_name in ["Setup_hrs", "Setup_Hrs", "SetupHrs", "setup_hrs", "SETUP_HRS"]:
             if col_name in machine_row.index:
                 setup_hrs = float(machine_row.get(col_name, 0.0) or 0.0)
                 break
-        
+
         splits = int(row.get("Splits", 1) or 1)  # NumCuts
 
         # Determine NumShtrRolls based on caliper
         # If caliper > 0.011 (board grade): NumShtrRolls = 1
-        # Otherwise: lookup from PaperInformation by ProductCategoryID + GSM_Factor
+        # Otherwise: lookup from PaperInformation (already joined via ProductGroupID + GSM)
         if caliper > 0.011:
             num_shtr_rolls = 1
         else:
-            # Join on ProductCategoryID (from inventory row) + GSM_Factor (from paper_row)
-            prod_cat = str(row.get("ProductCategoryID", "")).strip()
-            gsm_factor_key = paper_row.get("GSM_Factor")
             num_shtr_rolls = 1  # default
-            if (
-                prod_cat
-                and gsm_factor_key is not None
-                and not pd.isna(gsm_factor_key)
-                and paper_info_df is not None
-                and "ProductCategoryID" in paper_info_df.columns
-                and "GSM_Factor" in paper_info_df.columns
-                and "NumShtrRolls" in paper_info_df.columns
-            ):
-                nsr_matches = paper_info_df[
-                    (paper_info_df["ProductCategoryID"].astype(str).str.strip() == prod_cat)
-                    & (paper_info_df["GSM_Factor"] == float(gsm_factor_key))
-                    & (paper_info_df["NumShtrRolls"].notna())
-                    & (paper_info_df["NumShtrRolls"] > 0)
-                ]
-                if not nsr_matches.empty:
-                    num_shtr_rolls = int(float(nsr_matches.iloc[0]["NumShtrRolls"]))
-            else:
-                # Fallback to paper_row's NumShtrRolls if ProductCategoryID not available
-                num_shtr_rolls_val = paper_row.get("NumShtrRolls", None)
-                if num_shtr_rolls_val is not None:
-                    try:
-                        num_shtr_rolls = int(float(num_shtr_rolls_val))
-                    except (ValueError, TypeError):
-                        num_shtr_rolls = 1
-        
+            num_shtr_rolls_val = paper_row.get("NumShtrRolls", None)
+            if num_shtr_rolls_val is not None and pd.notna(num_shtr_rolls_val):
+                try:
+                    num_shtr_rolls = int(float(num_shtr_rolls_val))
+                except (ValueError, TypeError):
+                    num_shtr_rolls = 1
+
         # Ensure at least 1
         if num_shtr_rolls < 1:
             num_shtr_rolls = 1
 
-        # Basis weight to LB if needed
+        # Basis weight to LB if needed (GSM from Grade table)
         if basis_uom == "GSM":
-            gsm_factor = float(paper_row.get("GSM_Factor", 3100.0) or 3100.0)
+            gsm_factor = float(grade_row.get("GSM", 0.0) or 0.0)
             basis_lb = basis_wt / gsm_factor if gsm_factor else basis_wt
         else:
             basis_lb = basis_wt
@@ -533,7 +535,7 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
 # LOAD DATA
 # =========================================================
 df, last_refresh = load_inventory_data()
-paper_info_df, machine_info_df = load_supplementary_data()
+grade_df, paper_info_df, machine_info_df = load_supplementary_data()
 order_size_adj_df = load_order_size_adjustments()
 po_detail_df = load_po_detail()
 if df is None:
@@ -554,6 +556,7 @@ with st.sidebar:
     if last_refresh:
         st.info(f"Updated: {last_refresh.strftime('%I:%M %p')}")
     st.metric("Total Items", f"{len(df):,}")
+    st.success("✅ Grade Table Loaded" if grade_df is not None else "⚠️ Grade Table Missing")
     st.success("✅ Paper Info Loaded" if paper_info_df is not None else "⚠️ Paper Info Missing")
     st.success("✅ Machine Info Loaded" if machine_info_df is not None else "⚠️ Machine Info Missing")
     st.success("✅ Order Size Adj Loaded" if order_size_adj_df is not None else "⚠️ Order Size Adj Missing")
@@ -1019,12 +1022,13 @@ def run_search(params):
         # Conversion metrics for rolls
         if (
             not alternative_rolls.empty
+            and grade_df is not None
             and paper_info_df is not None
             and machine_info_df is not None
         ):
             conv_series = alternative_rolls.apply(
                 lambda r: calculate_conversion_cost(
-                    r, requested_width, paper_info_df, machine_info_df,
+                    r, requested_width, grade_df, paper_info_df, machine_info_df,
                     order_quantity=order_quantity, order_size_adj_df=order_size_adj_df
                 ),
                 axis=1,
@@ -1658,18 +1662,18 @@ if sheet_width and sheet_length:
                     if pd.notna(uom_val):
                         basis_uom = str(uom_val).strip().upper()
                 
-                # Look up Area(IN) and GSM_Factor from paper_info_df based on GradeID
+                # Look up Area(IN) and GSM from Grade table based on GradeID
                 area_in = None
                 gsm_factor = None
-                if paper_info_df is not None and "Area(IN)" in paper_info_df.columns and "GradeID" in combined_selected.columns:
+                if grade_df is not None and "GradeID" in combined_selected.columns:
                     grade_id = str(combined_selected.iloc[0].get("GradeID", "")).strip()
                     if grade_id:
-                        paper_match = paper_info_df[paper_info_df["GradeID"].astype(str).str.strip() == grade_id]
-                        if not paper_match.empty:
-                            area_in = float(paper_match.iloc[0].get("Area(IN)", 0) or 0)
-                            gsm_factor_val = paper_match.iloc[0].get("GSM_Factor")
-                            if pd.notna(gsm_factor_val) and float(gsm_factor_val) > 0:
-                                gsm_factor = float(gsm_factor_val)
+                        grade_match = grade_df[grade_df["GradeID"] == grade_id]
+                        if not grade_match.empty:
+                            area_in = float(grade_match.iloc[0].get("Area(IN)", 0) or 0)
+                            gsm_val = grade_match.iloc[0].get("GSM")
+                            if pd.notna(gsm_val) and float(gsm_val) > 0:
+                                gsm_factor = float(gsm_val)
                 
                 # Convert basis weight to LBS if needed
                 if selected_basis_wt and selected_basis_wt > 0:
@@ -1812,16 +1816,16 @@ if po_detail_df is not None and not po_detail_df.empty:
             alternative_sheets["GradeID"].dropna().astype(str).str.strip().tolist()
         )
 
-    # From exact_matches: look up GradeID via GradeName from paper_info_df
+    # From exact_matches: look up GradeID via GradeName from Grade table
     if not exact_matches.empty and "GradeName" in exact_matches.columns:
         if "GradeID" in exact_matches.columns:
             grade_ids.update(
                 exact_matches["GradeID"].dropna().astype(str).str.strip().tolist()
             )
-        elif paper_info_df is not None:
+        elif grade_df is not None and "Description" in grade_df.columns:
             for gn in exact_matches["GradeName"].dropna().unique():
-                match = paper_info_df[paper_info_df["GradeName"].astype(str).str.strip() == str(gn).strip()]
-                if not match.empty and "GradeID" in match.columns:
+                match = grade_df[grade_df["Description"].astype(str).str.strip() == str(gn).strip()]
+                if not match.empty:
                     grade_ids.update(
                         match["GradeID"].dropna().astype(str).str.strip().tolist()
                     )
