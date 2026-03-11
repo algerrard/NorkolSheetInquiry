@@ -104,7 +104,7 @@ def load_supplementary_data():
         grade_df["GSM"] = pd.to_numeric(grade_df["GSM"], errors="coerce")
         grade_df["Area(IN)"] = pd.to_numeric(grade_df["Area(IN)"], errors="coerce")
 
-        # PaperInformation (ProductGroupID + GSM_Factor -> RunAdjust, NumShtrRolls, etc.)
+        # PaperInformation (ProductGroupID + GSM_Factor -> RW_RunAdjust, SHT_RunAdjust, NumShtrRolls, etc.)
         paper_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=PAPER_INFO_BLOB)
         paper_csv = paper_client.download_blob().readall().decode("utf-8")
         paper_df = pd.read_csv(StringIO(paper_csv))
@@ -206,7 +206,7 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 
     Data sources:
     - Grade table: GradeID -> Area(IN), GSM, ProductGroupID
-    - PaperInformation: ProductGroupID + GSM_Factor -> RunAdjust, NumShtrRolls
+    - PaperInformation: ProductGroupID + GSM_Factor -> RW_RunAdjust, SHT_RunAdjust, NumShtrRolls
     - MachineInfo: EquipType -> AvgSpeed, HourlyRate, Roll_Change_Hrs, Setup_Hrs
 
     NumShtrRolls logic:
@@ -229,7 +229,7 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             if not gr.empty:
                 grade_row = gr.iloc[0]
 
-        # Lookup paper info (RunAdjust, NumShtrRolls) via ProductGroupID + GSM from Grade table
+        # Lookup paper info (SHT_RunAdjust, NumShtrRolls) via ProductGroupID + GSM from Grade table
         paper_row = None
         if grade_row is not None and paper_info_df is not None:
             prod_group_id = str(grade_row["ProductGroupID"]).strip()
