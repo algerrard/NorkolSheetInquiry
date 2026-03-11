@@ -68,7 +68,7 @@ BLOB_NAME = "Inventory/Norkol_Inventory"
 PAPER_INFO_BLOB = "PaperInformation.csv"
 MACHINE_INFO_BLOB = "MachineInfo.csv"
 GRADE_TABLE_BLOB = "Grade"
-ORDER_SIZE_ADJ_BLOB = "NI Order Size Adjustment.csv"
+ORDER_SIZE_ADJ_BLOB = "Order Size Adjustments.csv"
 PO_DETAIL_BLOB = "SODetail"
 
 # =========================================================
@@ -171,23 +171,16 @@ def get_order_size_pct(adj_df, process, description, order_qty):
     process_map = {"Rewinder": "Rewinding", "Sheeter": "Sheeting"}
     process_name = process_map.get(process, process)
 
-    mask = (adj_df["Process"].str.strip() == process_name) & (adj_df["Description"].str.strip() == description)
-    matches = adj_df[mask]
+    matches = adj_df[
+        (adj_df["MachineGroup"].str.strip() == process_name)
+        & (adj_df["AdjDescription"].str.strip() == description)
+        & (adj_df["Minimum"] <= order_qty)
+        & (adj_df["Maximum"] >= order_qty)
+    ]
     if matches.empty:
         return 0.0
 
-    row = matches.iloc[0]
-
-    if order_qty < 5000:
-        col = "Qty 0-4999 lbs"
-    elif order_qty < 10000:
-        col = "Qty 5000-9999 lbs"
-    elif order_qty < 20000:
-        col = "Qty 10000-19999"
-    else:
-        col = "Qty > 19999"
-
-    val = row.get(col, "0%")
+    val = matches.iloc[0]["Adjustment"]
     if isinstance(val, str):
         val = val.strip().rstrip("%")
     try:
@@ -229,14 +222,12 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             if not gr.empty:
                 grade_row = gr.iloc[0]
 
-        # Lookup paper info (SHT_RunAdjust, NumShtrRolls) via ProductGroupID + GSM from Grade table
+        # Lookup paper info (SHT_RunAdjust, NumShtrRolls) via ProductGroupID from Grade table
         paper_row = None
         if grade_row is not None and paper_info_df is not None:
             prod_group_id = str(grade_row["ProductGroupID"]).strip()
-            gsm_val = float(grade_row["GSM"]) if pd.notna(grade_row["GSM"]) else 0.0
             pr = paper_info_df[
-                (paper_info_df["ProductGroupID"] == prod_group_id)
-                & (paper_info_df["GSM_Factor"] == gsm_val)
+                paper_info_df["ProductGroupID"].astype(str).str.strip() == prod_group_id
             ]
             if not pr.empty:
                 paper_row = pr.iloc[0]
