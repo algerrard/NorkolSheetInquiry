@@ -130,6 +130,8 @@ def load_order_size_adjustments():
         csv_content = blob_client.download_blob().readall().decode("utf-8")
         order_size_adj_df = pd.read_csv(StringIO(csv_content))
         order_size_adj_df.columns = order_size_adj_df.columns.str.strip()
+        order_size_adj_df["Minimum"] = pd.to_numeric(order_size_adj_df["Minimum"], errors="coerce")
+        order_size_adj_df["Maximum"] = pd.to_numeric(order_size_adj_df["Maximum"], errors="coerce")
         return order_size_adj_df
     except Exception as e:
         st.warning(f"Could not load order size adjustments: {str(e)}")
