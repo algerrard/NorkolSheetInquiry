@@ -70,6 +70,7 @@ MACHINE_INFO_BLOB = "MachineInfo.csv"
 GRADE_TABLE_BLOB = "Grade"
 ORDER_SIZE_ADJ_BLOB = "Order Size Adjustments.csv"
 PO_DETAIL_BLOB = "SODetail"
+RESERVE_INV_BLOB = "Inventory/ReserveInventory.csv"
 
 # =========================================================
 # DATA LOADING
@@ -135,6 +136,26 @@ def load_order_size_adjustments():
         return order_size_adj_df
     except Exception as e:
         st.warning(f"Could not load order size adjustments: {str(e)}")
+        return None
+
+
+@st.cache_data(ttl=3600)
+def load_reserve_inventory():
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+        blob_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=RESERVE_INV_BLOB)
+        csv_content = blob_client.download_blob().readall().decode("utf-8")
+        ri_df = pd.read_csv(StringIO(csv_content), on_bad_lines="skip", encoding="utf-8")
+        ri_df.columns = ri_df.columns.str.strip()
+        for col in ["BasisWt", "Caliper", "Roll_Width", "QtyOnHand", "Diameter", "Units",
+                     "SheetWidth", "SheetLength"]:
+            if col in ri_df.columns:
+                ri_df[col] = pd.to_numeric(ri_df[col], errors="coerce")
+        if "ReserveDate" in ri_df.columns:
+            ri_df["ReserveDate"] = pd.to_datetime(ri_df["ReserveDate"], errors="coerce")
+        return ri_df
+    except Exception as e:
+        st.warning(f"Could not load reserve inventory: {str(e)}")
         return None
 
 
@@ -531,6 +552,7 @@ df, last_refresh = load_inventory_data()
 grade_df, paper_info_df, machine_info_df = load_supplementary_data()
 order_size_adj_df = load_order_size_adjustments()
 po_detail_df = load_po_detail()
+reserve_inv_df = load_reserve_inventory()
 if df is None:
     st.stop()
 
@@ -1789,6 +1811,199 @@ if not export_df.empty:
         )
 else:
     st.caption("Select rows above to enable export.")
+
+# =========================================================
+# DISPLAY: RESERVED INVENTORY
+# =========================================================
+if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width is not None:
+    sp = st.session_state.search_params
+    req_width = float(sp.get("sheet_width_input", 0) or 0)
+    req_length = float(sp.get("sheet_length_input", 0) or 0)
+    mw_pct = sp.get("max_waste_pct", 10)
+
+    # Filter to reservations older than 30 days
+    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=30)
+    ri = reserve_inv_df[reserve_inv_df["ReserveDate"] <= cutoff_date].copy()
+
+    # Apply same search filters as main inventory
+    if "WarehouseGroup" in ri.columns and sp.get("warehouse_group", "All") != "All":
+        ri = ri[ri["WarehouseGroup"] == sp["warehouse_group"]]
+
+    sp_pg = sp.get("product_group", "All")
+    if sp_pg != "All":
+        if "ProductGroupID" in ri.columns:
+            ri = ri[ri["ProductGroupID"] == sp_pg]
+        elif "ProductGroup" in ri.columns:
+            ri = ri[ri["ProductGroup"] == sp_pg]
+
+    if "GradeName" in ri.columns and sp.get("grade_names"):
+        ri = ri[ri["GradeName"].isin(sp["grade_names"])]
+
+    if "BasisWt" in ri.columns and sp.get("basis_weights"):
+        ri = ri[ri["BasisWt"].isin(sp["basis_weights"])]
+
+    sp_cal = sp.get("calipers")
+    if "Caliper" in ri.columns and sp_cal:
+        caliper_floats = [float(c) for c in sp_cal]
+        ri = ri[pd.to_numeric(ri["Caliper"], errors="coerce").round(4).isin(caliper_floats)]
+
+    # --- Match sheets: exact + alternative (by area waste) ---
+    ri_sheets = pd.DataFrame()
+    if req_width > 0 and req_length > 0:
+        if "SheetWidth" in ri.columns and "SheetLength" in ri.columns:
+            ri_s = ri.dropna(subset=["SheetWidth", "SheetLength"]).copy()
+            ri_s = ri_s[(ri_s["SheetWidth"] > 0) & (ri_s["SheetLength"] > 0)]
+
+            # Exact sheet matches
+            ri_s_exact = ri_s[
+                (ri_s["SheetWidth"].round(2) == round(req_width, 2)) &
+                (ri_s["SheetLength"].round(2) == round(req_length, 2))
+            ].copy()
+            ri_s_exact["Splits"] = 1
+            ri_s_exact["Waste_Pct"] = 0.0
+            ri_s_exact["MatchType"] = "Sheet"
+
+            # Alternative sheets (larger in both dimensions)
+            ri_s_alt = ri_s[
+                (ri_s["SheetWidth"] >= req_width) &
+                (ri_s["SheetLength"] >= req_length) &
+                ~((ri_s["SheetWidth"].round(2) == round(req_width, 2)) &
+                  (ri_s["SheetLength"].round(2) == round(req_length, 2)))
+            ].copy()
+            if not ri_s_alt.empty:
+                ri_s_alt["Requested_Area"] = req_width * req_length
+                ri_s_alt["Actual_Area"] = ri_s_alt["SheetWidth"] * ri_s_alt["SheetLength"]
+                ri_s_alt["Waste_Pct"] = ((ri_s_alt["Actual_Area"] - ri_s_alt["Requested_Area"]) / ri_s_alt["Actual_Area"]) * 100.0
+                ri_s_alt["Splits"] = 1
+                ri_s_alt = ri_s_alt[ri_s_alt["Waste_Pct"] <= mw_pct]
+                ri_s_alt["MatchType"] = "Sheet"
+
+            ri_sheets = pd.concat([ri_s_exact, ri_s_alt], ignore_index=True)
+
+    # --- Match rolls: exact + alternative (by width splits) ---
+    ri_rolls = pd.DataFrame()
+    if req_width > 0 and "Roll_Width" in ri.columns:
+        ri_r = ri.dropna(subset=["Roll_Width"]).copy()
+        ri_r = ri_r[ri_r["Roll_Width"] > 0]
+
+        # Exact roll width
+        ri_r_exact = ri_r[ri_r["Roll_Width"].round(2) == round(req_width, 2)].copy()
+        ri_r_exact["Splits"] = 1
+        ri_r_exact["Waste_Pct"] = 0.0
+        ri_r_exact["MatchType"] = "Roll"
+
+        # Alternative rolls (wider, within waste tolerance)
+        ri_r_alt = ri_r[ri_r["Roll_Width"] > req_width].copy()
+        if not ri_r_alt.empty:
+            ri_r_alt["Splits"] = (ri_r_alt["Roll_Width"] / req_width).astype(int)
+            ri_r_alt["Waste_Inches"] = ri_r_alt["Roll_Width"] - (ri_r_alt["Splits"] * req_width)
+            ri_r_alt["Waste_Pct"] = (ri_r_alt["Waste_Inches"] / ri_r_alt["Roll_Width"]) * 100.0
+            ri_r_alt = ri_r_alt[ri_r_alt["Waste_Pct"] <= mw_pct]
+            ri_r_alt["MatchType"] = "Roll"
+
+        ri_rolls = pd.concat([ri_r_exact, ri_r_alt], ignore_index=True)
+
+    ri_combined = pd.concat([ri_sheets, ri_rolls], ignore_index=True)
+
+    if not ri_combined.empty:
+        ri_combined["DaysReserved"] = (pd.Timestamp.now() - ri_combined["ReserveDate"]).dt.days
+
+        # Group by key fields
+        ri_group_cols = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "SheetWidth", "SheetLength",
+                         "Mill", "Brand", "MatchType", "ResSONum", "ReserveSalesRep", "ResCust"]
+        available_grp = [c for c in ri_group_cols if c in ri_combined.columns]
+
+        ri_grouped = ri_combined.groupby(available_grp, dropna=False).agg(
+            QtyOnHand=("QtyOnHand", "sum"),
+            Units=("Units", "sum"),
+            Splits=("Splits", "first"),
+            Waste_Pct=("Waste_Pct", "first"),
+            ReserveDate=("ReserveDate", "min"),
+            DaysReserved=("DaysReserved", "max"),
+        ).reset_index()
+
+        ri_grouped = ri_grouped.sort_values("DaysReserved", ascending=False)
+
+        st.markdown("---")
+        st.subheader("🔒 Reserved Inventory (> 30 days)")
+
+        ri_ratios = [
+            1.3,  # Grade
+            0.7,  # BasisWt
+            0.7,  # Caliper
+            0.8,  # Width
+            0.8,  # Length
+            0.6,  # Type
+            0.8,  # Mill
+            0.8,  # Brand
+            0.9,  # Qty
+            0.6,  # #Rolls
+            0.6,  # Splits
+            0.7,  # Waste%
+            0.9,  # Reserved
+            0.5,  # Days
+            0.8,  # SO#
+            0.9,  # SalesRep
+            1.1,  # Customer
+        ]
+
+        RH = st.columns(ri_ratios)
+        ri_headers = [
+            "Grade", "BasisWt", "Caliper", "Width", "Length", "Type",
+            "Mill", "Brand", "Qty", "#Rolls", "Splits", "Waste%",
+            "Reserved", "Days", "SO#", "Sales Rep", "Customer"
+        ]
+        for i, title in enumerate(ri_headers):
+            with RH[i]:
+                st.markdown(f"**{title}**")
+        st.markdown("---")
+
+        for _, row in ri_grouped.iterrows():
+            RC = st.columns(ri_ratios)
+            with RC[0]:  st.write(row.get("GradeName", ""))
+            with RC[1]:
+                v = row.get("BasisWt")
+                st.write(f"{float(v):.0f}" if pd.notna(v) else "")
+            with RC[2]:
+                v = row.get("Caliper")
+                st.write(f"{float(v):.3f}" if pd.notna(v) else "")
+            with RC[3]:
+                # Show Roll_Width for rolls, SheetWidth for sheets
+                match_type = row.get("MatchType", "")
+                if match_type == "Roll":
+                    v = row.get("Roll_Width")
+                else:
+                    v = row.get("SheetWidth")
+                st.write(f'{float(v):.2f}"' if pd.notna(v) else "")
+            with RC[4]:
+                v = row.get("SheetLength") if row.get("MatchType") == "Sheet" else None
+                st.write(f'{float(v):.2f}"' if pd.notna(v) and v else "—")
+            with RC[5]:  st.write(row.get("MatchType", ""))
+            with RC[6]:  st.write(row.get("Mill", ""))
+            with RC[7]:  st.write(row.get("Brand", ""))
+            with RC[8]:
+                v = row.get("QtyOnHand")
+                st.write(f"{float(v):,.0f}" if pd.notna(v) else "")
+            with RC[9]:
+                v = row.get("Units")
+                st.write(f"{int(v):,}" if pd.notna(v) else "")
+            with RC[10]:
+                v = row.get("Splits")
+                st.write(f"{int(v)}x" if pd.notna(v) else "")
+            with RC[11]:
+                v = row.get("Waste_Pct")
+                st.write(f"{float(v):.1f}%" if pd.notna(v) else "")
+            with RC[12]:
+                v = row.get("ReserveDate")
+                st.write(v.strftime("%Y-%m-%d") if pd.notna(v) else "")
+            with RC[13]:
+                v = row.get("DaysReserved")
+                st.write(f"{int(v)}" if pd.notna(v) else "")
+            with RC[14]:
+                v = row.get("ResSONum")
+                st.write(str(v).strip() if pd.notna(v) and str(v).strip() not in ("", "nan") else "—")
+            with RC[15]:  st.write(row.get("ReserveSalesRep", "") or "")
+            with RC[16]:  st.write(row.get("ResCust", "") or "")
 
 # =========================================================
 # RECENT SALES ORDERS
