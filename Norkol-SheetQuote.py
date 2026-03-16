@@ -1927,85 +1927,46 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
         st.markdown("---")
         st.subheader("🔒 Reserved Inventory (> 30 days)")
 
-        ri_ratios = [
-            1.2,  # Grade
-            0.6,  # BasisWt
-            0.6,  # Caliper
-            0.7,  # Width
-            0.7,  # Length
-            0.5,  # Type
-            0.7,  # Mill
-            0.7,  # Brand
-            0.8,  # Qty
-            0.5,  # #Rolls
-            0.5,  # Splits
-            0.6,  # Waste%
-            0.8,  # Reserved
-            0.4,  # Days
-            0.7,  # SO#
-            0.8,  # SalesRep
-            1.0,  # Customer
-            0.7,  # Warehouse
-        ]
+        # Build display dataframe
+        ri_display = ri_grouped[[]].copy()
+        ri_display["Grade"] = ri_grouped.get("GradeName", "")
+        ri_display["BasisWt"] = ri_grouped["BasisWt"]
+        ri_display["Caliper"] = ri_grouped["Caliper"]
+        # Width: Roll_Width for rolls, SheetWidth for sheets
+        ri_display["Width"] = ri_grouped.apply(
+            lambda r: r.get("Roll_Width") if r.get("MatchType") == "Roll" else r.get("SheetWidth"), axis=1
+        )
+        ri_display["Length"] = ri_grouped.apply(
+            lambda r: r.get("SheetLength") if r.get("MatchType") == "Sheet" else None, axis=1
+        )
+        ri_display["Type"] = ri_grouped.get("MatchType", "")
+        ri_display["Mill"] = ri_grouped.get("Mill", "")
+        ri_display["Brand"] = ri_grouped.get("Brand", "")
+        ri_display["Qty"] = ri_grouped["QtyOnHand"]
+        ri_display["#Rolls"] = ri_grouped["Units"]
+        ri_display["Splits"] = ri_grouped["Splits"]
+        ri_display["Waste%"] = ri_grouped["Waste_Pct"]
+        ri_display["Reserved"] = ri_grouped["ReserveDate"]
+        ri_display["Days"] = ri_grouped["DaysReserved"]
+        ri_display["SO#"] = ri_grouped.get("ResSONum", "")
+        ri_display["Sales Rep"] = ri_grouped.get("ReserveSalesRep", "")
+        ri_display["Customer"] = ri_grouped.get("ResCust", "")
+        ri_display["Warehouse"] = ri_grouped.get("Warehouse", "")
 
-        RH = st.columns(ri_ratios)
-        ri_headers = [
-            "Grade", "BasisWt", "Caliper", "Width", "Length", "Type",
-            "Mill", "Brand", "Qty", "#Rolls", "Splits", "Waste%",
-            "Reserved", "Days", "SO#", "Sales Rep", "Customer", "Whse"
-        ]
-        for i, title in enumerate(ri_headers):
-            with RH[i]:
-                st.markdown(f"**{title}**")
-        st.markdown("---")
+        ri_col_config = {
+            "BasisWt": st.column_config.NumberColumn("BasisWt", format="%d"),
+            "Caliper": st.column_config.NumberColumn("Caliper", format="%.3f"),
+            "Width": st.column_config.NumberColumn("Width", format='%.2f"'),
+            "Length": st.column_config.NumberColumn("Length", format='%.2f"'),
+            "Qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+            "#Rolls": st.column_config.NumberColumn("#Rolls", format="%d"),
+            "Splits": st.column_config.NumberColumn("Splits", format="%d"),
+            "Waste%": st.column_config.NumberColumn("Waste%", format="%.1f%%"),
+            "Reserved": st.column_config.DateColumn("Reserved", format="YYYY-MM-DD"),
+            "Days": st.column_config.NumberColumn("Days", format="%d"),
+        }
 
-        for _, row in ri_grouped.iterrows():
-            RC = st.columns(ri_ratios)
-            with RC[0]:  st.write(row.get("GradeName", ""))
-            with RC[1]:
-                v = row.get("BasisWt")
-                st.write(f"{float(v):.0f}" if pd.notna(v) else "")
-            with RC[2]:
-                v = row.get("Caliper")
-                st.write(f"{float(v):.3f}" if pd.notna(v) else "")
-            with RC[3]:
-                # Show Roll_Width for rolls, SheetWidth for sheets
-                match_type = row.get("MatchType", "")
-                if match_type == "Roll":
-                    v = row.get("Roll_Width")
-                else:
-                    v = row.get("SheetWidth")
-                st.write(f'{float(v):.2f}"' if pd.notna(v) else "")
-            with RC[4]:
-                v = row.get("SheetLength") if row.get("MatchType") == "Sheet" else None
-                st.write(f'{float(v):.2f}"' if pd.notna(v) and v else "—")
-            with RC[5]:  st.write(row.get("MatchType", ""))
-            with RC[6]:  st.write(row.get("Mill", ""))
-            with RC[7]:  st.write(row.get("Brand", ""))
-            with RC[8]:
-                v = row.get("QtyOnHand")
-                st.write(f"{float(v):,.0f}" if pd.notna(v) else "")
-            with RC[9]:
-                v = row.get("Units")
-                st.write(f"{int(v):,}" if pd.notna(v) else "")
-            with RC[10]:
-                v = row.get("Splits")
-                st.write(f"{int(v)}x" if pd.notna(v) else "")
-            with RC[11]:
-                v = row.get("Waste_Pct")
-                st.write(f"{float(v):.1f}%" if pd.notna(v) else "")
-            with RC[12]:
-                v = row.get("ReserveDate")
-                st.write(v.strftime("%Y-%m-%d") if pd.notna(v) else "")
-            with RC[13]:
-                v = row.get("DaysReserved")
-                st.write(f"{int(v)}" if pd.notna(v) else "")
-            with RC[14]:
-                v = row.get("ResSONum")
-                st.write(str(v).strip() if pd.notna(v) and str(v).strip() not in ("", "nan") else "—")
-            with RC[15]:  st.write(row.get("ReserveSalesRep", "") or "")
-            with RC[16]:  st.write(row.get("ResCust", "") or "")
-            with RC[17]:  st.write(row.get("Warehouse", "") or "")
+        st.dataframe(ri_display, use_container_width=True, hide_index=True, column_config=ri_col_config)
 
 # =========================================================
 # RECENT SALES ORDERS
