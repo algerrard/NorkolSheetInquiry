@@ -1928,24 +1928,24 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
         st.subheader("🔒 Reserved Inventory (> 30 days)")
 
         ri_ratios = [
-            1.3,  # Grade
-            0.7,  # BasisWt
-            0.7,  # Caliper
-            0.8,  # Width
-            0.8,  # Length
-            0.6,  # Type
-            0.8,  # Mill
-            0.8,  # Brand
-            0.9,  # Qty
-            0.6,  # #Rolls
-            0.6,  # Splits
-            0.7,  # Waste%
-            0.9,  # Reserved
-            0.5,  # Days
-            0.8,  # SO#
-            0.9,  # SalesRep
-            1.1,  # Customer
-            0.8,  # Warehouse
+            1.2,  # Grade
+            0.6,  # BasisWt
+            0.6,  # Caliper
+            0.7,  # Width
+            0.7,  # Length
+            0.5,  # Type
+            0.7,  # Mill
+            0.7,  # Brand
+            0.8,  # Qty
+            0.5,  # #Rolls
+            0.5,  # Splits
+            0.6,  # Waste%
+            0.8,  # Reserved
+            0.4,  # Days
+            0.7,  # SO#
+            0.8,  # SalesRep
+            1.0,  # Customer
+            0.7,  # Warehouse
         ]
 
         RH = st.columns(ri_ratios)
