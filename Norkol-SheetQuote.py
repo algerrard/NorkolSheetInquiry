@@ -1910,7 +1910,7 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
 
         # Group by key fields
         ri_group_cols = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "SheetWidth", "SheetLength",
-                         "Mill", "Brand", "MatchType", "ResSONum", "ReserveSalesRep", "ResCust"]
+                         "Mill", "Brand", "MatchType", "ResSONum", "ReserveSalesRep", "ResCust", "Warehouse"]
         available_grp = [c for c in ri_group_cols if c in ri_combined.columns]
 
         ri_grouped = ri_combined.groupby(available_grp, dropna=False).agg(
@@ -1945,13 +1945,14 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
             0.8,  # SO#
             0.9,  # SalesRep
             1.1,  # Customer
+            0.8,  # Warehouse
         ]
 
         RH = st.columns(ri_ratios)
         ri_headers = [
             "Grade", "BasisWt", "Caliper", "Width", "Length", "Type",
             "Mill", "Brand", "Qty", "#Rolls", "Splits", "Waste%",
-            "Reserved", "Days", "SO#", "Sales Rep", "Customer"
+            "Reserved", "Days", "SO#", "Sales Rep", "Customer", "Whse"
         ]
         for i, title in enumerate(ri_headers):
             with RH[i]:
@@ -2004,6 +2005,7 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
                 st.write(str(v).strip() if pd.notna(v) and str(v).strip() not in ("", "nan") else "—")
             with RC[15]:  st.write(row.get("ReserveSalesRep", "") or "")
             with RC[16]:  st.write(row.get("ResCust", "") or "")
+            with RC[17]:  st.write(row.get("Warehouse", "") or "")
 
 # =========================================================
 # RECENT SALES ORDERS
