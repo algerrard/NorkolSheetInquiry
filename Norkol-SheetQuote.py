@@ -313,6 +313,16 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
         if num_shtr_rolls < 1:
             num_shtr_rolls = 1
 
+        # SHT_RunAdjust: per-grade efficiency multiplier (default 1.0 if missing)
+        sht_run_adjust_val = paper_row.get("SHT_RunAdjust", None)
+        if sht_run_adjust_val is None or pd.isna(sht_run_adjust_val):
+            sht_run_adjust = 1.0
+        else:
+            try:
+                sht_run_adjust = float(sht_run_adjust_val)
+            except (ValueError, TypeError):
+                sht_run_adjust = 1.0
+
         # Basis weight to LB if needed (GSM from Grade table)
         if basis_uom == "GSM":
             gsm_factor = float(grade_row.get("GSM", 0.0) or 0.0)
@@ -325,12 +335,13 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
                 {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
             )
 
-        # Lbs/Hour = BasisWt/(Area*500) * (CutWidth * NumCuts * NumShtrRolls) * (AvgSpeed * 12) * 60
+        # Lbs/Hour = BasisWt/(Area*500) * (CutWidth * NumCuts * NumShtrRolls) * (AvgSpeed * 12) * 60 * SHT_RunAdjust
         lbs_per_hour = (
             (basis_lb / (area_in * 500.0))
             * (float(requested_width) * splits * num_shtr_rolls)
             * (avg_speed * 12.0)
             * 60.0
+            * sht_run_adjust
         )
 
         # Processing weight: use Yield if available, else QtyOnHand
@@ -1954,19 +1965,27 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
         ri_display["Warehouse"] = ri_grouped.get("Warehouse", "")
 
         ri_col_config = {
-            "BasisWt": st.column_config.NumberColumn("BasisWt", format="%d"),
-            "Caliper": st.column_config.NumberColumn("Caliper", format="%.3f"),
-            "Width": st.column_config.NumberColumn("Width", format='%.2f"'),
-            "Length": st.column_config.NumberColumn("Length", format='%.2f"'),
-            "Qty": st.column_config.NumberColumn("Qty", format="%.0f"),
-            "#Rolls": st.column_config.NumberColumn("#Rolls", format="%d"),
-            "Splits": st.column_config.NumberColumn("Splits", format="%d"),
-            "Waste%": st.column_config.NumberColumn("Waste%", format="%.1f%%"),
-            "Reserved": st.column_config.DateColumn("Reserved", format="YYYY-MM-DD"),
-            "Days": st.column_config.NumberColumn("Days", format="%d"),
+            "Grade": st.column_config.TextColumn("Grade", width="medium"),
+            "BasisWt": st.column_config.NumberColumn("BasisWt", format="%d", width="small"),
+            "Caliper": st.column_config.NumberColumn("Caliper", format="%.3f", width="small"),
+            "Width": st.column_config.NumberColumn("Width", format='%.2f"', width="small"),
+            "Length": st.column_config.NumberColumn("Length", format='%.2f"', width="small"),
+            "Type": st.column_config.TextColumn("Type", width="small"),
+            "Mill": st.column_config.TextColumn("Mill", width="medium"),
+            "Brand": st.column_config.TextColumn("Brand", width="medium"),
+            "Qty": st.column_config.NumberColumn("Qty", format="%.0f", width="small"),
+            "#Rolls": st.column_config.NumberColumn("#Rolls", format="%d", width="small"),
+            "Splits": st.column_config.NumberColumn("Splits", format="%d", width="small"),
+            "Waste%": st.column_config.NumberColumn("Waste%", format="%.1f%%", width="small"),
+            "Reserved": st.column_config.DateColumn("Reserved", format="YYYY-MM-DD", width="medium"),
+            "Days": st.column_config.NumberColumn("Days", format="%d", width="small"),
+            "SO#": st.column_config.TextColumn("SO#", width="medium"),
+            "Sales Rep": st.column_config.TextColumn("Sales Rep", width="medium"),
+            "Customer": st.column_config.TextColumn("Customer", width="medium"),
+            "Warehouse": st.column_config.TextColumn("Warehouse", width="medium"),
         }
 
-        st.dataframe(ri_display, use_container_width=True, hide_index=True, column_config=ri_col_config)
+        st.dataframe(ri_display, use_container_width=False, hide_index=True, column_config=ri_col_config)
 
 # =========================================================
 # RECENT SALES ORDERS
