@@ -116,6 +116,7 @@ def load_supplementary_data():
         machine_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=MACHINE_INFO_BLOB)
         machine_csv = machine_client.download_blob().readall().decode("utf-8")
         machine_df = pd.read_csv(StringIO(machine_csv))
+        machine_df.columns = machine_df.columns.str.strip()
 
         return grade_df, paper_df, machine_df
     except Exception as e:
@@ -600,19 +601,20 @@ with st.form("search_form"):
     col1, col2 = st.columns(2)
 
     with col1:
+        rc = st.session_state.get("reset_counter", 0)
         wh_opts = (
             ["All"] + sorted(df["WarehouseGroup"].dropna().unique().tolist())
             if "WarehouseGroup" in df.columns
             else ["All"]
         )
-        warehouse_group = st.selectbox("Warehouse Group", wh_opts)
+        warehouse_group = st.selectbox("Warehouse Group", wh_opts, key=f"fld_warehouse_group_{rc}")
 
         if "ProductGroupID" in df.columns:
             pg_opts = ["All"] + sorted(df["ProductGroupID"].dropna().unique().tolist())
-            product_group = st.selectbox("Product Group", pg_opts)
+            product_group = st.selectbox("Product Group", pg_opts, key=f"fld_product_group_{rc}")
         elif "ProductGroup" in df.columns:
             pg_opts = ["All"] + sorted(df["ProductGroup"].dropna().unique().tolist())
-            product_group = st.selectbox("Product Group", pg_opts)
+            product_group = st.selectbox("Product Group", pg_opts, key=f"fld_product_group_{rc}")
         else:
             product_group = "All"
 
@@ -621,36 +623,38 @@ with st.form("search_form"):
             if "GradeName" in df.columns
             else []
         )
-        grade_names = st.multiselect("Grade Name(s)", gn_opts, placeholder="All grades (leave empty)")
+        grade_names = st.multiselect("Grade Name(s)", gn_opts, placeholder="All grades (leave empty)", key=f"fld_grade_names_{rc}")
 
         bw_opts = (
             sorted([x for x in df["BasisWt"].dropna().unique().tolist()])
             if "BasisWt" in df.columns
             else []
         )
-        basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)")
+        basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)", key=f"fld_basis_weights_{rc}")
 
         if "Caliper" in df.columns:
             caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
             cal_opts = [f"{x:.4f}" for x in sorted(caliper_values)]
-            calipers = st.multiselect("Caliper(s)", cal_opts, placeholder="All calipers (leave empty)")
+            calipers = st.multiselect("Caliper(s)", cal_opts, placeholder="All calipers (leave empty)", key=f"fld_calipers_{rc}")
         else:
             calipers = []
 
     with col2:
-        sheet_width_input = st.text_input("Sheet Width Needed", placeholder='e.g., 48 or 48.5')
-        sheet_length_input = st.text_input("Sheet Length Needed", placeholder='e.g., 36 or 36.5')
+        sheet_width_input = st.text_input("Sheet Width Needed", placeholder='e.g., 48 or 48.5', key=f"fld_sheet_width_{rc}")
+        sheet_length_input = st.text_input("Sheet Length Needed", placeholder='e.g., 36 or 36.5', key=f"fld_sheet_length_{rc}")
         max_waste_pct = st.number_input(
             "Max Waste % (for alternatives)",
             min_value=0.0,
             max_value=100.0,
             value=10.0,
             step=1.0,
+            key=f"fld_max_waste_pct_{rc}",
         )
         order_quantity = st.number_input(
             "Order Quantity (lbs) *",
             min_value=0,
             value=0,
+            key=f"fld_order_quantity_{rc}",
         )
 
     c1, c2 = st.columns([1, 3])
@@ -664,6 +668,7 @@ if reset_btn:
     st.session_state.sel_alt_sheets_idx = set()
     st.session_state.sel_alt_rolls_idx = set()
     st.session_state.search_params = {}
+    st.session_state.reset_counter = st.session_state.get("reset_counter", 0) + 1
     st.rerun()
 
 
