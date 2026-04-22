@@ -664,6 +664,9 @@ with st.form("search_form"):
         reset_btn = st.form_submit_button("🔄 Reset", use_container_width=True)
 
 if reset_btn:
+    for k in list(st.session_state.keys()):
+        if k.startswith("fld_"):
+            del st.session_state[k]
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_sheets_idx = set()
     st.session_state.sel_alt_rolls_idx = set()
