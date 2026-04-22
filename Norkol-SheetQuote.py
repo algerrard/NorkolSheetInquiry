@@ -360,39 +360,26 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 
         total_cost = total_hours * hourly_rate
 
+        # Raw per-row CWT — as if only this alternative were used, no minimum
+        # and no OrderQty surcharge. Both are applied at the summary level
+        # once rows are selected.
         conv_cwt = (
             (total_cost / process_weight) * 100.0
             if process_weight and process_weight > 0
             else None
         )
 
-        # Apply OrderQty surcharge from order size adjustments
-        if conv_cwt is not None and order_quantity is not None and order_size_adj_df is not None:
-            order_qty_pct = get_order_size_pct(order_size_adj_df, equip_type, "OrderQty", order_quantity)
-            conv_cwt *= (1 + order_qty_pct)
-
-        # Minimum 1 hour charge: if total cost after all surcharges is below
-        # the hourly rate, bump conv_cwt up to the 1-hour minimum
-        min_charge_applied = False
-        if conv_cwt is not None and process_weight and process_weight > 0:
-            min_cost = hourly_rate  # 1 hour minimum
-            final_total_cost = (conv_cwt / 100.0) * process_weight
-            if final_total_cost < min_cost:
-                conv_cwt = (min_cost / process_weight) * 100.0
-                min_charge_applied = True
-
         return pd.Series(
             {
                 "LbsPerHour": lbs_per_hour,
                 "ConvHrs": total_hours,
                 "ConvertingCostPerCWT": conv_cwt,
-                "MinChargeApplied": min_charge_applied,
             }
         )
 
     except Exception:
         return pd.Series(
-            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None, "MinChargeApplied": False}
+            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
         )
 
 
@@ -956,10 +943,8 @@ def run_search(params):
                         per_cwt_rate = per_cwt_rate.replace('$', '').replace(',', '').strip()
                     try:
                         per_cwt_rate = float(per_cwt_rate)
-                        # Apply OrderQty surcharge to converting rate
-                        if order_quantity is not None and order_size_adj_df is not None:
-                            order_qty_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "OrderQty", order_quantity)
-                            per_cwt_rate *= (1 + order_qty_pct)
+                        # Raw per-row rate — OrderQty surcharge and minimum
+                        # are applied at the summary level, not per row.
                         alternative_sheets["ConvertingCostPerCWT"] = per_cwt_rate
                         # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
                         if "NetAvgCost" in alternative_sheets.columns:
@@ -1415,7 +1400,7 @@ else:
 st.subheader("🎞️ Alternative Rolls")
 if not alternative_rolls.empty:
     # Ensure required computed columns exist
-    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct", "MinChargeApplied"]:
+    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct"]:
         if c not in alternative_rolls.columns:
             alternative_rolls[c] = None
 
@@ -1521,17 +1506,11 @@ if not alternative_rolls.empty:
         with C[15]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
-            is_min = row.get('MinChargeApplied')
-            suffix = " *" if is_min else ""
-            st.write(f"${v:.2f}{suffix}" if v is not None else '')
+            st.write(f"${v:.2f}" if v is not None else '')
         with C[16]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-
-    # Footnote if any rows have minimum charge applied
-    if alternative_rolls["MinChargeApplied"].any():
-        st.caption("* Minimum 1-hour converting charge applied")
 
     with st.expander("📋 Alternative Rolls Details — Underlying Inventory"):
         sel_rl_idx = sorted(list(st.session_state.sel_alt_rolls_idx))
