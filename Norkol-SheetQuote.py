@@ -1755,8 +1755,82 @@ if (
     and order_quantity_param
     and order_quantity_param > 0
 ):
-    equip_type_sel = "Sheeter"  # Sheet app always uses Sheeter for surcharge/min
+    equip_type_sel = "Sheeter"
 
+    # --- Alt sheets: flat Trimmer rate × yield (per-row model, unchanged) ---
+    alt_sheets_job_dollar = 0.0
+    if (
+        not selected_alt_sheets.empty
+        and "ConvertingCostPerCWT" in selected_alt_sheets.columns
+        and "Yield" in selected_alt_sheets.columns
+    ):
+        alt_sheets_job_dollar = (
+            (selected_alt_sheets["ConvertingCostPerCWT"].fillna(0.0) / 100.0)
+            * selected_alt_sheets["Yield"].fillna(0.0)
+        ).sum()
+
+    # --- Alt rolls: NCC-style JOB-level calc (setup once, roll changes totalled,
+    # processing scaled by rate_qty = max(order_qty, 20000) for flat base rate) ---
+    alt_rolls_job_dollar = 0.0
+    if (
+        not selected_alt_rolls.empty
+        and "LbsPerHour" in selected_alt_rolls.columns
+        and "Yield" in selected_alt_rolls.columns
+        and machine_info_df is not None
+    ):
+        y_rolls = selected_alt_rolls["Yield"].fillna(0.0)
+        lph_rolls = selected_alt_rolls["LbsPerHour"].replace(0, np.nan)
+        total_y_rolls = y_rolls.sum()
+        total_proc_hrs_yield = (y_rolls / lph_rolls).sum()
+
+        if total_y_rolls > 0 and total_proc_hrs_yield > 0:
+            effective_lbs_per_hour = total_y_rolls / total_proc_hrs_yield
+
+            total_units = (
+                selected_alt_rolls["Units"].fillna(0.0).sum()
+                if "Units" in selected_alt_rolls.columns else 0.0
+            )
+            avg_yield_per_roll = (total_y_rolls / total_units) if total_units > 0 else total_y_rolls
+
+            # Rolls running simultaneously (Sheeter + thin stock → NumShtrRolls)
+            first_caliper = float(selected_alt_rolls.iloc[0].get("Caliper", 0) or 0)
+            rolls_running = 1
+            if first_caliper > 0 and first_caliper <= 0.011 and paper_info_df is not None:
+                first_pg = str(selected_alt_rolls.iloc[0].get("ProductGroupID", "")).strip()
+                if first_pg and "ProductGroupID" in paper_info_df.columns:
+                    pr = paper_info_df[
+                        paper_info_df["ProductGroupID"].astype(str).str.strip() == first_pg
+                    ]
+                    if not pr.empty:
+                        nsr = pr.iloc[0].get("NumShtrRolls")
+                        if nsr is not None and pd.notna(nsr) and float(nsr) > 0:
+                            rolls_running = int(float(nsr))
+
+            mr_sheeter = machine_info_df[
+                machine_info_df["EquipType"].astype(str).str.strip() == equip_type_sel
+            ]
+            if not mr_sheeter.empty:
+                sheeter_hr = float(mr_sheeter.iloc[0].get("HourlyRate", 273.0) or 273.0)
+                sheeter_setup = float(mr_sheeter.iloc[0].get("Setup_Hrs", 0.3) or 0.3)
+                sheeter_rc = float(mr_sheeter.iloc[0].get("Roll_Change_Hrs", 0.0) or 0.0)
+
+                # Base rate held flat at 20k+ lbs (NCC convention)
+                rate_qty = max(order_quantity_param, 20000)
+
+                rolls_needed = int(np.ceil(rate_qty / avg_yield_per_roll)) if avg_yield_per_roll > 0 else 1
+                roll_change_hrs_job = (
+                    int(np.ceil(rolls_needed / rolls_running)) * sheeter_rc
+                ) if rolls_running > 0 else 0
+                processing_hrs = rate_qty / effective_lbs_per_hour
+                total_hrs = processing_hrs + roll_change_hrs_job + sheeter_setup
+                cost_at_rate = total_hrs * sheeter_hr
+
+                # Pro-rate to customer's actual order quantity
+                alt_rolls_job_dollar = cost_at_rate * (order_quantity_param / rate_qty)
+
+    raw_conv_dollar = alt_sheets_job_dollar + alt_rolls_job_dollar
+
+    # Machine minimum charge (Sheeter)
     min_chg = 0.0
     if machine_info_df is not None and "EquipType" in machine_info_df.columns:
         mr = machine_info_df[
@@ -1765,6 +1839,7 @@ if (
         if not mr.empty:
             min_chg = float(mr.iloc[0].get("Minimum Charge", 0.0) or 0.0)
 
+    # OrderQty bracket surcharge
     surcharge_pct = 0.0
     if order_size_adj_df is not None:
         surcharge_pct = get_order_size_pct(
@@ -1772,8 +1847,7 @@ if (
         )
 
     # Apply OrderQty surcharge first, then compare against machine minimum
-    surcharged_cwt = blended_conv_cwt * (1 + surcharge_pct)
-    surcharged_dollar = surcharged_cwt * order_quantity_param / 100.0
+    surcharged_dollar = raw_conv_dollar * (1 + surcharge_pct)
     final_conv_dollar = max(surcharged_dollar, min_chg) if min_chg > 0 else surcharged_dollar
     final_conv_cwt = (final_conv_dollar / order_quantity_param) * 100.0
 
