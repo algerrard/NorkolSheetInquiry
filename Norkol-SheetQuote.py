@@ -583,6 +583,28 @@ with st.sidebar:
 # =========================================================
 st.title("🔍 Norkol Sheet Stock Search")
 
+# --- TEMP DIAGNOSTIC: show what the app is reading for C1S BOARD ---
+with st.expander("🔧 Debug: PaperInfo lookup", expanded=True):
+    if paper_info_df is not None:
+        c1s = paper_info_df[
+            paper_info_df["ProductGroupID"].astype(str).str.strip() == "C1S BOARD"
+        ]
+        if c1s.empty:
+            st.error("No row found for ProductGroupID == 'C1S BOARD'")
+        else:
+            st.write(f"**Found {len(c1s)} row(s) for C1S BOARD**")
+            st.dataframe(c1s)
+            for i in range(len(c1s)):
+                row = c1s.iloc[i]
+                st.write(
+                    f"Row {i}: GradeID=`{row.get('GradeID')!r}` · "
+                    f"GradeName=`{row.get('GradeName')!r}` · "
+                    f"RunAdjust=`{row.get('RunAdjust')!r}` · "
+                    f"NumShtrRolls=`{row.get('NumShtrRolls')!r}`"
+                )
+    else:
+        st.error("paper_info_df is None (load failed)")
+
 # =========================================================
 # SEARCH FORM
 # =========================================================
