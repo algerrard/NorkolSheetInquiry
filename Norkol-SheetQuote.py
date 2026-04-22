@@ -1714,13 +1714,92 @@ est_sheets = None
 if mweight and mweight > 0 and total_lbs > 0:
     est_sheets = (total_lbs / mweight) * 1000
 
-c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+# --- Blended converting cost (raw) and order-adjusted converting cost ---
+order_quantity_param = st.session_state.search_params.get("order_quantity")
+blended_conv_cwt = 0.0
+final_conv_cwt = None
+order_qty_cost_cwt = None
+order_qty_cost_per_m = None
+
+# Yield-weighted converting cost across BOTH alternative tables (sheets + rolls)
+alt_conv_dollar = 0.0
+alt_yield_for_conv = 0.0
+
+if (
+    not selected_alt_sheets.empty
+    and "ConvertingCostPerCWT" in selected_alt_sheets.columns
+    and "Yield" in selected_alt_sheets.columns
+):
+    alt_conv_dollar += (
+        (selected_alt_sheets["ConvertingCostPerCWT"].fillna(0.0) / 100.0)
+        * selected_alt_sheets["Yield"].fillna(0.0)
+    ).sum()
+    alt_yield_for_conv += selected_alt_sheets["Yield"].fillna(0.0).sum()
+
+if (
+    not selected_alt_rolls.empty
+    and "ConvertingCostPerCWT" in selected_alt_rolls.columns
+    and "Yield" in selected_alt_rolls.columns
+):
+    alt_conv_dollar += (
+        (selected_alt_rolls["ConvertingCostPerCWT"].fillna(0.0) / 100.0)
+        * selected_alt_rolls["Yield"].fillna(0.0)
+    ).sum()
+    alt_yield_for_conv += selected_alt_rolls["Yield"].fillna(0.0).sum()
+
+if alt_yield_for_conv > 0:
+    blended_conv_cwt = (alt_conv_dollar / alt_yield_for_conv) * 100.0
+
+if (
+    (alt_sheets_sel_idx_sorted or alt_rolls_sel_idx_sorted)
+    and order_quantity_param
+    and order_quantity_param > 0
+):
+    equip_type_sel = "Sheeter"  # Sheet app always uses Sheeter for surcharge/min
+
+    min_chg = 0.0
+    if machine_info_df is not None and "EquipType" in machine_info_df.columns:
+        mr = machine_info_df[
+            machine_info_df["EquipType"].astype(str).str.strip() == equip_type_sel
+        ]
+        if not mr.empty:
+            min_chg = float(mr.iloc[0].get("Minimum Charge", 0.0) or 0.0)
+
+    surcharge_pct = 0.0
+    if order_size_adj_df is not None:
+        surcharge_pct = get_order_size_pct(
+            order_size_adj_df, equip_type_sel, "OrderQty", order_quantity_param
+        )
+
+    # Apply OrderQty surcharge first, then compare against machine minimum
+    surcharged_cwt = blended_conv_cwt * (1 + surcharge_pct)
+    surcharged_dollar = surcharged_cwt * order_quantity_param / 100.0
+    final_conv_dollar = max(surcharged_dollar, min_chg) if min_chg > 0 else surcharged_dollar
+    final_conv_cwt = (final_conv_dollar / order_quantity_param) * 100.0
+
+    # Order Qty Cost = paper portion of blended + order-adjusted converting
+    order_qty_cost_cwt = (blended_cost_cwt - blended_conv_cwt) + final_conv_cwt
+    if mweight and mweight > 0:
+        order_qty_cost_per_m = order_qty_cost_cwt * 0.01 * mweight
+
+# Shrink metric label/value fonts so 10 columns fit without wrapping
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetric"] > label { font-size: 0.75rem; }
+    div[data-testid="stMetricValue"] > div { font-size: 1.05rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+c1, c2, c3, c4, c5, c6, c7, c8, c9, c10 = st.columns(10)
 with c1:
     st.metric("Exact Qty Selected", f"{total_exact_lbs:,.0f} lbs")
 with c2:
     st.metric("Alt Yield Selected", f"{total_alt_yield:,.0f} lbs")
 with c3:
-    st.metric("Total Usable Weight", f"{total_lbs:,.0f} lbs")
+    st.metric("Total Estimated Yield", f"{total_lbs:,.0f} lbs")
 with c4:
     st.metric("Mweight", f"{mweight:,.0f} lbs" if mweight is not None else "—")
 with c5:
@@ -1729,6 +1808,18 @@ with c6:
     st.metric("Cost Per M Sheets", f"${cost_per_m:,.2f}" if cost_per_m is not None else "—")
 with c7:
     st.metric("Est. Sheets", f"{est_sheets:,.0f}" if est_sheets is not None else "—")
+with c8:
+    st.metric("Order Qty", f"{order_quantity_param:,.0f} lbs" if order_quantity_param else "—")
+with c9:
+    st.metric(
+        "Order Qty Cost",
+        f"${order_qty_cost_cwt:,.2f} / CWT" if order_qty_cost_cwt is not None else "— / CWT",
+    )
+with c10:
+    st.metric(
+        "Order Qty Cost",
+        f"${order_qty_cost_per_m:,.2f} / M Sheets" if order_qty_cost_per_m is not None else "— / M Sheets",
+    )
 
 if mweight_error:
     st.error(mweight_error)
