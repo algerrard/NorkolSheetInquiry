@@ -100,6 +100,7 @@ def load_supplementary_data():
         grade_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=GRADE_TABLE_BLOB)
         grade_csv = grade_client.download_blob().readall().decode("utf-8")
         grade_df = pd.read_csv(StringIO(grade_csv))
+        grade_df.columns = grade_df.columns.str.strip()
         grade_df["GradeID"] = grade_df["GradeID"].astype(str).str.strip()
         grade_df["ProductGroupID"] = grade_df["ProductGroupID"].astype(str).str.strip()
         grade_df["GSM"] = pd.to_numeric(grade_df["GSM"], errors="coerce")
@@ -109,6 +110,7 @@ def load_supplementary_data():
         paper_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=PAPER_INFO_BLOB)
         paper_csv = paper_client.download_blob().readall().decode("utf-8")
         paper_df = pd.read_csv(StringIO(paper_csv))
+        paper_df.columns = paper_df.columns.str.strip()
         paper_df["ProductGroupID"] = paper_df["ProductGroupID"].astype(str).str.strip()
         paper_df["GSM_Factor"] = pd.to_numeric(paper_df["GSM_Factor"], errors="coerce")
 
