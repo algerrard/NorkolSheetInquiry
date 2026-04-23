@@ -583,6 +583,23 @@ with st.sidebar:
 # =========================================================
 st.title("🔍 Norkol Sheet Stock Search")
 
+# --- TEMP DIAGNOSTIC: full dump of what the app sees ---
+with st.expander("🔧 Debug", expanded=True):
+    st.write("**paper_info_df columns:**", list(paper_info_df.columns) if paper_info_df is not None else "None")
+    st.write("**machine_info_df columns:**", list(machine_info_df.columns) if machine_info_df is not None else "None")
+    if paper_info_df is not None:
+        c1s = paper_info_df[
+            paper_info_df["ProductGroupID"].astype(str).str.strip() == "C1S BOARD"
+        ]
+        if not c1s.empty:
+            st.write(f"**C1S BOARD — first row full contents:**")
+            st.json({k: str(v) for k, v in c1s.iloc[0].to_dict().items()})
+    if machine_info_df is not None:
+        sht = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == "Sheeter"]
+        if not sht.empty:
+            st.write("**Sheeter row full contents:**")
+            st.json({k: str(v) for k, v in sht.iloc[0].to_dict().items()})
+
 # =========================================================
 # SEARCH FORM
 # =========================================================
