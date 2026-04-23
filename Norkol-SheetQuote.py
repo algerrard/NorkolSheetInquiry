@@ -316,8 +316,8 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
         if num_shtr_rolls < 1:
             num_shtr_rolls = 1
 
-        # RunAdjust: per-grade efficiency multiplier (default 1.0 if missing)
-        sht_run_adjust_val = paper_row.get("RunAdjust", None)
+        # SHT_RunAdjust: per-grade sheeting efficiency multiplier (default 1.0 if missing)
+        sht_run_adjust_val = paper_row.get("SHT_RunAdjust", None)
         if sht_run_adjust_val is None or pd.isna(sht_run_adjust_val):
             sht_run_adjust = 1.0
         else:
