@@ -100,6 +100,7 @@ def load_supplementary_data():
         grade_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=GRADE_TABLE_BLOB)
         grade_csv = grade_client.download_blob().readall().decode("utf-8")
         grade_df = pd.read_csv(StringIO(grade_csv))
+        grade_df.columns = grade_df.columns.str.strip()
         grade_df["GradeID"] = grade_df["GradeID"].astype(str).str.strip()
         grade_df["ProductGroupID"] = grade_df["ProductGroupID"].astype(str).str.strip()
         grade_df["GSM"] = pd.to_numeric(grade_df["GSM"], errors="coerce")
@@ -109,6 +110,7 @@ def load_supplementary_data():
         paper_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=PAPER_INFO_BLOB)
         paper_csv = paper_client.download_blob().readall().decode("utf-8")
         paper_df = pd.read_csv(StringIO(paper_csv))
+        paper_df.columns = paper_df.columns.str.strip()
         paper_df["ProductGroupID"] = paper_df["ProductGroupID"].astype(str).str.strip()
         paper_df["GSM_Factor"] = pd.to_numeric(paper_df["GSM_Factor"], errors="coerce")
 
@@ -116,6 +118,7 @@ def load_supplementary_data():
         machine_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=MACHINE_INFO_BLOB)
         machine_csv = machine_client.download_blob().readall().decode("utf-8")
         machine_df = pd.read_csv(StringIO(machine_csv))
+        machine_df.columns = machine_df.columns.str.strip()
 
         return grade_df, paper_df, machine_df
     except Exception as e:
@@ -313,7 +316,7 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
         if num_shtr_rolls < 1:
             num_shtr_rolls = 1
 
-        # SHT_RunAdjust: per-grade efficiency multiplier (default 1.0 if missing)
+        # SHT_RunAdjust: per-grade sheeting efficiency multiplier (default 1.0 if missing)
         sht_run_adjust_val = paper_row.get("SHT_RunAdjust", None)
         if sht_run_adjust_val is None or pd.isna(sht_run_adjust_val):
             sht_run_adjust = 1.0
@@ -359,39 +362,26 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 
         total_cost = total_hours * hourly_rate
 
+        # Raw per-row CWT — as if only this alternative were used, no minimum
+        # and no OrderQty surcharge. Both are applied at the summary level
+        # once rows are selected.
         conv_cwt = (
             (total_cost / process_weight) * 100.0
             if process_weight and process_weight > 0
             else None
         )
 
-        # Apply OrderQty surcharge from order size adjustments
-        if conv_cwt is not None and order_quantity is not None and order_size_adj_df is not None:
-            order_qty_pct = get_order_size_pct(order_size_adj_df, equip_type, "OrderQty", order_quantity)
-            conv_cwt *= (1 + order_qty_pct)
-
-        # Minimum 1 hour charge: if total cost after all surcharges is below
-        # the hourly rate, bump conv_cwt up to the 1-hour minimum
-        min_charge_applied = False
-        if conv_cwt is not None and process_weight and process_weight > 0:
-            min_cost = hourly_rate  # 1 hour minimum
-            final_total_cost = (conv_cwt / 100.0) * process_weight
-            if final_total_cost < min_cost:
-                conv_cwt = (min_cost / process_weight) * 100.0
-                min_charge_applied = True
-
         return pd.Series(
             {
                 "LbsPerHour": lbs_per_hour,
                 "ConvHrs": total_hours,
                 "ConvertingCostPerCWT": conv_cwt,
-                "MinChargeApplied": min_charge_applied,
             }
         )
 
     except Exception:
         return pd.Series(
-            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None, "MinChargeApplied": False}
+            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
         )
 
 
@@ -600,19 +590,20 @@ with st.form("search_form"):
     col1, col2 = st.columns(2)
 
     with col1:
+        rc = st.session_state.get("reset_counter", 0)
         wh_opts = (
             ["All"] + sorted(df["WarehouseGroup"].dropna().unique().tolist())
             if "WarehouseGroup" in df.columns
             else ["All"]
         )
-        warehouse_group = st.selectbox("Warehouse Group", wh_opts)
+        warehouse_group = st.selectbox("Warehouse Group", wh_opts, key=f"fld_warehouse_group_{rc}")
 
         if "ProductGroupID" in df.columns:
             pg_opts = ["All"] + sorted(df["ProductGroupID"].dropna().unique().tolist())
-            product_group = st.selectbox("Product Group", pg_opts)
+            product_group = st.selectbox("Product Group", pg_opts, key=f"fld_product_group_{rc}")
         elif "ProductGroup" in df.columns:
             pg_opts = ["All"] + sorted(df["ProductGroup"].dropna().unique().tolist())
-            product_group = st.selectbox("Product Group", pg_opts)
+            product_group = st.selectbox("Product Group", pg_opts, key=f"fld_product_group_{rc}")
         else:
             product_group = "All"
 
@@ -621,36 +612,38 @@ with st.form("search_form"):
             if "GradeName" in df.columns
             else []
         )
-        grade_names = st.multiselect("Grade Name(s)", gn_opts, placeholder="All grades (leave empty)")
+        grade_names = st.multiselect("Grade Name(s)", gn_opts, placeholder="All grades (leave empty)", key=f"fld_grade_names_{rc}")
 
         bw_opts = (
             sorted([x for x in df["BasisWt"].dropna().unique().tolist()])
             if "BasisWt" in df.columns
             else []
         )
-        basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)")
+        basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)", key=f"fld_basis_weights_{rc}")
 
         if "Caliper" in df.columns:
             caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
             cal_opts = [f"{x:.4f}" for x in sorted(caliper_values)]
-            calipers = st.multiselect("Caliper(s)", cal_opts, placeholder="All calipers (leave empty)")
+            calipers = st.multiselect("Caliper(s)", cal_opts, placeholder="All calipers (leave empty)", key=f"fld_calipers_{rc}")
         else:
             calipers = []
 
     with col2:
-        sheet_width_input = st.text_input("Sheet Width Needed", placeholder='e.g., 48 or 48.5')
-        sheet_length_input = st.text_input("Sheet Length Needed", placeholder='e.g., 36 or 36.5')
+        sheet_width_input = st.text_input("Sheet Width Needed", placeholder='e.g., 48 or 48.5', key=f"fld_sheet_width_{rc}")
+        sheet_length_input = st.text_input("Sheet Length Needed", placeholder='e.g., 36 or 36.5', key=f"fld_sheet_length_{rc}")
         max_waste_pct = st.number_input(
             "Max Waste % (for alternatives)",
             min_value=0.0,
             max_value=100.0,
             value=10.0,
             step=1.0,
+            key=f"fld_max_waste_pct_{rc}",
         )
         order_quantity = st.number_input(
             "Order Quantity (lbs) *",
             min_value=0,
             value=0,
+            key=f"fld_order_quantity_{rc}",
         )
 
     c1, c2 = st.columns([1, 3])
@@ -660,10 +653,14 @@ with st.form("search_form"):
         reset_btn = st.form_submit_button("🔄 Reset", use_container_width=True)
 
 if reset_btn:
+    for k in list(st.session_state.keys()):
+        if k.startswith("fld_"):
+            del st.session_state[k]
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_sheets_idx = set()
     st.session_state.sel_alt_rolls_idx = set()
     st.session_state.search_params = {}
+    st.session_state.reset_counter = st.session_state.get("reset_counter", 0) + 1
     st.rerun()
 
 
@@ -948,10 +945,8 @@ def run_search(params):
                         per_cwt_rate = per_cwt_rate.replace('$', '').replace(',', '').strip()
                     try:
                         per_cwt_rate = float(per_cwt_rate)
-                        # Apply OrderQty surcharge to converting rate
-                        if order_quantity is not None and order_size_adj_df is not None:
-                            order_qty_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "OrderQty", order_quantity)
-                            per_cwt_rate *= (1 + order_qty_pct)
+                        # Raw per-row rate — OrderQty surcharge and minimum
+                        # are applied at the summary level, not per row.
                         alternative_sheets["ConvertingCostPerCWT"] = per_cwt_rate
                         # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
                         if "NetAvgCost" in alternative_sheets.columns:
@@ -1407,7 +1402,7 @@ else:
 st.subheader("🎞️ Alternative Rolls")
 if not alternative_rolls.empty:
     # Ensure required computed columns exist
-    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct", "MinChargeApplied"]:
+    for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct"]:
         if c not in alternative_rolls.columns:
             alternative_rolls[c] = None
 
@@ -1513,17 +1508,11 @@ if not alternative_rolls.empty:
         with C[15]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
-            is_min = row.get('MinChargeApplied')
-            suffix = " *" if is_min else ""
-            st.write(f"${v:.2f}{suffix}" if v is not None else '')
+            st.write(f"${v:.2f}" if v is not None else '')
         with C[16]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-
-    # Footnote if any rows have minimum charge applied
-    if alternative_rolls["MinChargeApplied"].any():
-        st.caption("* Minimum 1-hour converting charge applied")
 
     with st.expander("📋 Alternative Rolls Details — Underlying Inventory"):
         sel_rl_idx = sorted(list(st.session_state.sel_alt_rolls_idx))
@@ -1727,13 +1716,166 @@ est_sheets = None
 if mweight and mweight > 0 and total_lbs > 0:
     est_sheets = (total_lbs / mweight) * 1000
 
-c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+# --- Blended converting cost (raw) and order-adjusted converting cost ---
+order_quantity_param = st.session_state.search_params.get("order_quantity")
+blended_conv_cwt = 0.0
+final_conv_cwt = None
+order_qty_cost_cwt = None
+order_qty_cost_per_m = None
+
+# Yield-weighted converting cost across BOTH alternative tables (sheets + rolls)
+alt_conv_dollar = 0.0
+alt_yield_for_conv = 0.0
+
+if (
+    not selected_alt_sheets.empty
+    and "ConvertingCostPerCWT" in selected_alt_sheets.columns
+    and "Yield" in selected_alt_sheets.columns
+):
+    alt_conv_dollar += (
+        (selected_alt_sheets["ConvertingCostPerCWT"].fillna(0.0) / 100.0)
+        * selected_alt_sheets["Yield"].fillna(0.0)
+    ).sum()
+    alt_yield_for_conv += selected_alt_sheets["Yield"].fillna(0.0).sum()
+
+if (
+    not selected_alt_rolls.empty
+    and "ConvertingCostPerCWT" in selected_alt_rolls.columns
+    and "Yield" in selected_alt_rolls.columns
+):
+    alt_conv_dollar += (
+        (selected_alt_rolls["ConvertingCostPerCWT"].fillna(0.0) / 100.0)
+        * selected_alt_rolls["Yield"].fillna(0.0)
+    ).sum()
+    alt_yield_for_conv += selected_alt_rolls["Yield"].fillna(0.0).sum()
+
+if alt_yield_for_conv > 0:
+    blended_conv_cwt = (alt_conv_dollar / alt_yield_for_conv) * 100.0
+
+if (
+    (alt_sheets_sel_idx_sorted or alt_rolls_sel_idx_sorted)
+    and order_quantity_param
+    and order_quantity_param > 0
+):
+    equip_type_sel = "Sheeter"
+
+    # --- Alt sheets: flat Trimmer rate × yield (per-row model, unchanged) ---
+    alt_sheets_job_dollar = 0.0
+    if (
+        not selected_alt_sheets.empty
+        and "ConvertingCostPerCWT" in selected_alt_sheets.columns
+        and "Yield" in selected_alt_sheets.columns
+    ):
+        alt_sheets_job_dollar = (
+            (selected_alt_sheets["ConvertingCostPerCWT"].fillna(0.0) / 100.0)
+            * selected_alt_sheets["Yield"].fillna(0.0)
+        ).sum()
+
+    # --- Alt rolls: NCC-style JOB-level calc (setup once, roll changes totalled,
+    # processing scaled by rate_qty = max(order_qty, 20000) for flat base rate) ---
+    alt_rolls_job_dollar = 0.0
+    if (
+        not selected_alt_rolls.empty
+        and "LbsPerHour" in selected_alt_rolls.columns
+        and "Yield" in selected_alt_rolls.columns
+        and machine_info_df is not None
+    ):
+        y_rolls = selected_alt_rolls["Yield"].fillna(0.0)
+        lph_rolls = selected_alt_rolls["LbsPerHour"].replace(0, np.nan)
+        total_y_rolls = y_rolls.sum()
+        total_proc_hrs_yield = (y_rolls / lph_rolls).sum()
+
+        if total_y_rolls > 0 and total_proc_hrs_yield > 0:
+            effective_lbs_per_hour = total_y_rolls / total_proc_hrs_yield
+
+            total_units = (
+                selected_alt_rolls["Units"].fillna(0.0).sum()
+                if "Units" in selected_alt_rolls.columns else 0.0
+            )
+            avg_yield_per_roll = (total_y_rolls / total_units) if total_units > 0 else total_y_rolls
+
+            # Rolls running simultaneously (Sheeter + thin stock → NumShtrRolls)
+            first_caliper = float(selected_alt_rolls.iloc[0].get("Caliper", 0) or 0)
+            rolls_running = 1
+            if first_caliper > 0 and first_caliper <= 0.011 and paper_info_df is not None:
+                first_pg = str(selected_alt_rolls.iloc[0].get("ProductGroupID", "")).strip()
+                if first_pg and "ProductGroupID" in paper_info_df.columns:
+                    pr = paper_info_df[
+                        paper_info_df["ProductGroupID"].astype(str).str.strip() == first_pg
+                    ]
+                    if not pr.empty:
+                        nsr = pr.iloc[0].get("NumShtrRolls")
+                        if nsr is not None and pd.notna(nsr) and float(nsr) > 0:
+                            rolls_running = int(float(nsr))
+
+            mr_sheeter = machine_info_df[
+                machine_info_df["EquipType"].astype(str).str.strip() == equip_type_sel
+            ]
+            if not mr_sheeter.empty:
+                sheeter_hr = float(mr_sheeter.iloc[0].get("HourlyRate", 273.0) or 273.0)
+                sheeter_setup = float(mr_sheeter.iloc[0].get("Setup_Hrs", 0.3) or 0.3)
+                sheeter_rc = float(mr_sheeter.iloc[0].get("Roll_Change_Hrs", 0.0) or 0.0)
+
+                # Base rate held flat at 20k+ lbs (NCC convention)
+                rate_qty = max(order_quantity_param, 20000)
+
+                rolls_needed = int(np.ceil(rate_qty / avg_yield_per_roll)) if avg_yield_per_roll > 0 else 1
+                roll_change_hrs_job = (
+                    int(np.ceil(rolls_needed / rolls_running)) * sheeter_rc
+                ) if rolls_running > 0 else 0
+                processing_hrs = rate_qty / effective_lbs_per_hour
+                total_hrs = processing_hrs + roll_change_hrs_job + sheeter_setup
+                cost_at_rate = total_hrs * sheeter_hr
+
+                # Pro-rate to customer's actual order quantity
+                alt_rolls_job_dollar = cost_at_rate * (order_quantity_param / rate_qty)
+
+    raw_conv_dollar = alt_sheets_job_dollar + alt_rolls_job_dollar
+
+    # Machine minimum charge (Sheeter)
+    min_chg = 0.0
+    if machine_info_df is not None and "EquipType" in machine_info_df.columns:
+        mr = machine_info_df[
+            machine_info_df["EquipType"].astype(str).str.strip() == equip_type_sel
+        ]
+        if not mr.empty:
+            min_chg = float(mr.iloc[0].get("Minimum Charge", 0.0) or 0.0)
+
+    # OrderQty bracket surcharge
+    surcharge_pct = 0.0
+    if order_size_adj_df is not None:
+        surcharge_pct = get_order_size_pct(
+            order_size_adj_df, equip_type_sel, "OrderQty", order_quantity_param
+        )
+
+    # Apply OrderQty surcharge first, then compare against machine minimum
+    surcharged_dollar = raw_conv_dollar * (1 + surcharge_pct)
+    final_conv_dollar = max(surcharged_dollar, min_chg) if min_chg > 0 else surcharged_dollar
+    final_conv_cwt = (final_conv_dollar / order_quantity_param) * 100.0
+
+    # Order Qty Cost = paper portion of blended + order-adjusted converting
+    order_qty_cost_cwt = (blended_cost_cwt - blended_conv_cwt) + final_conv_cwt
+    if mweight and mweight > 0:
+        order_qty_cost_per_m = order_qty_cost_cwt * 0.01 * mweight
+
+# Shrink metric label/value fonts so 10 columns fit without wrapping
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetric"] > label { font-size: 0.75rem; }
+    div[data-testid="stMetricValue"] > div { font-size: 1.05rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+c1, c2, c3, c4, c5, c6, c7, c8, c9, c10 = st.columns(10)
 with c1:
     st.metric("Exact Qty Selected", f"{total_exact_lbs:,.0f} lbs")
 with c2:
     st.metric("Alt Yield Selected", f"{total_alt_yield:,.0f} lbs")
 with c3:
-    st.metric("Total Usable Weight", f"{total_lbs:,.0f} lbs")
+    st.metric("Total Estimated Yield", f"{total_lbs:,.0f} lbs")
 with c4:
     st.metric("Mweight", f"{mweight:,.0f} lbs" if mweight is not None else "—")
 with c5:
@@ -1742,6 +1884,18 @@ with c6:
     st.metric("Cost Per M Sheets", f"${cost_per_m:,.2f}" if cost_per_m is not None else "—")
 with c7:
     st.metric("Est. Sheets", f"{est_sheets:,.0f}" if est_sheets is not None else "—")
+with c8:
+    st.metric("Order Qty", f"{order_quantity_param:,.0f} lbs" if order_quantity_param else "—")
+with c9:
+    st.metric(
+        "Order Qty Cost",
+        f"${order_qty_cost_cwt:,.2f} / CWT" if order_qty_cost_cwt is not None else "— / CWT",
+    )
+with c10:
+    st.metric(
+        "Order Qty Cost",
+        f"${order_qty_cost_per_m:,.2f} / M Sheets" if order_qty_cost_per_m is not None else "— / M Sheets",
+    )
 
 if mweight_error:
     st.error(mweight_error)
