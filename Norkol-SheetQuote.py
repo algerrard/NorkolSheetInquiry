@@ -520,15 +520,21 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
     blended_cwt = summary_data.get('blended_cwt') or 0
     cost_per_m = summary_data.get('cost_per_m')
     est_sheets = summary_data.get('est_sheets')
-    
+    order_qty = summary_data.get('order_qty')
+    order_qty_cost_cwt = summary_data.get('order_qty_cost_cwt')
+    order_qty_cost_per_m = summary_data.get('order_qty_cost_per_m')
+
     summary_table_data = [
         ["Exact Qty Selected:", f"{exact_lbs:,.0f} lbs"],
         ["Alt Yield Selected:", f"{alt_yield:,.0f} lbs"],
-        ["Total Usable Weight:", f"{total_lbs:,.0f} lbs"],
+        ["Total Estimated Yield:", f"{total_lbs:,.0f} lbs"],
         ["Mweight:", f"{mweight:,.0f} lbs" if mweight else "—"],
         ["Blended Cost / CWT:", f"${blended_cwt:,.2f}"],
         ["Cost Per M Sheets:", f"${cost_per_m:,.2f}" if cost_per_m else "—"],
         ["Estimated Sheets:", f"{est_sheets:,.0f}" if est_sheets else "—"],
+        ["Order Qty:", f"{order_qty:,.0f} lbs" if order_qty else "—"],
+        ["Order Qty Cost / CWT:", f"${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "—"],
+        ["Order Qty Cost / M Sheets:", f"${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "—"],
     ]
     
     summary_table = Table(summary_table_data, colWidths=[2*inch, 2*inch])
@@ -1936,30 +1942,50 @@ if not export_df.empty:
         fname = f"NKQuote_{dim_token}.csv"
         pdf_fname = f"NKQuote_{dim_token}.pdf"
 
+    # Gather summary data (shared between CSV and PDF exports)
+    summary_data = {
+        "exact_lbs": total_exact_lbs,
+        "alt_yield": total_alt_yield,
+        "total_lbs": total_lbs,
+        "mweight": mweight,
+        "blended_cwt": blended_cost_cwt,
+        "cost_per_m": cost_per_m,
+        "est_sheets": est_sheets,
+        "order_qty": order_quantity_param,
+        "order_qty_cost_cwt": order_qty_cost_cwt,
+        "order_qty_cost_per_m": order_qty_cost_per_m,
+    }
+
+    # Build CSV: per-row data + summary footer
+    csv_body = export_df.to_csv(index=False)
+    footer_rows = [
+        "",
+        "Summary,",
+        f"Exact Qty Selected,{total_exact_lbs:,.0f} lbs",
+        f"Alt Yield Selected,{total_alt_yield:,.0f} lbs",
+        f"Total Estimated Yield,{total_lbs:,.0f} lbs",
+        f"Mweight,{mweight:,.0f} lbs" if mweight else "Mweight,—",
+        f"Blended Cost / CWT,${blended_cost_cwt:,.2f}",
+        f"Cost Per M Sheets,${cost_per_m:,.2f}" if cost_per_m is not None else "Cost Per M Sheets,—",
+        f"Estimated Sheets,{est_sheets:,.0f}" if est_sheets is not None else "Estimated Sheets,—",
+        f"Order Qty,{order_quantity_param:,.0f} lbs" if order_quantity_param else "Order Qty,—",
+        f"Order Qty Cost / CWT,${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "Order Qty Cost / CWT,—",
+        f"Order Qty Cost / M Sheets,${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "Order Qty Cost / M Sheets,—",
+    ]
+    csv_with_summary = csv_body + "\n".join(footer_rows) + "\n"
+
     # Export buttons side by side
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
-    
+
     with btn_col1:
         st.download_button(
             "💾 Export to CSV",
-            export_df.to_csv(index=False).encode("utf-8"),
+            csv_with_summary.encode("utf-8"),
             file_name=fname,
             mime="text/csv",
         )
-    
+
     with btn_col2:
-        # Gather summary data for PDF
-        summary_data = {
-            "exact_lbs": total_exact_lbs,
-            "alt_yield": total_alt_yield,
-            "total_lbs": total_lbs,
-            "mweight": mweight,
-            "blended_cwt": blended_cost_cwt,
-            "cost_per_m": cost_per_m,
-            "est_sheets": est_sheets,
-        }
-        
-        # Generate PDF
         pdf_bytes = generate_quote_pdf(
             st.session_state.search_params,
             selected_exact,
@@ -1967,7 +1993,7 @@ if not export_df.empty:
             selected_alt_rolls,
             summary_data
         )
-        
+
         st.download_button(
             "📄 Export to PDF",
             pdf_bytes,
