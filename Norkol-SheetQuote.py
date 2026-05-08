@@ -422,7 +422,11 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Sheet Width:", f"{search_params.get('sheet_width_input')}\"" if search_params.get("sheet_width_input") else "Not specified"],
         ["Sheet Length:", f"{search_params.get('sheet_length_input')}\"" if search_params.get("sheet_length_input") else "Not specified"],
         ["Max Waste %:", f"{search_params.get('max_waste_pct')}%" if search_params.get("max_waste_pct") is not None else "Not specified"],
-        ["Order Quantity:", f"{search_params.get('order_quantity'):,} lbs" if search_params.get("order_quantity") else "Not specified"],
+        ["Order Quantity:", (
+            f"{search_params.get('order_quantity_sheets'):,} sheets ({search_params.get('order_quantity'):,.0f} lbs)"
+            if search_params.get("order_qty_unit") == "Sheets" and search_params.get("order_quantity_sheets")
+            else f"{search_params.get('order_quantity'):,.0f} lbs"
+        ) if search_params.get("order_quantity") else "Not specified"],
     ]
     
     param_table = Table(param_data, colWidths=[1.5*inch, 4*inch])
@@ -645,12 +649,24 @@ with st.form("search_form"):
             step=1.0,
             key=f"fld_max_waste_pct_{rc}",
         )
+        order_qty_unit = st.radio(
+            "Order Quantity Unit",
+            options=["LBS", "Sheets"],
+            horizontal=True,
+            key=f"fld_order_qty_unit_{rc}",
+        )
+        qty_label = "Order Quantity (sheets) *" if order_qty_unit == "Sheets" else "Order Quantity (lbs) *"
         order_quantity = st.number_input(
-            "Order Quantity (lbs) *",
+            qty_label,
             min_value=0,
             value=0,
             key=f"fld_order_quantity_{rc}",
         )
+        if order_qty_unit == "Sheets":
+            st.caption(
+                "Sheets mode requires exactly one Grade Name and one Basis Weight selected, "
+                "plus Sheet Width and Sheet Length."
+            )
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -1088,6 +1104,55 @@ def run_search(params):
 # EXECUTE SEARCH (Unified)
 # =========================================================
 if search_btn:
+    order_quantity_lbs = order_quantity
+    order_quantity_sheets = None
+    sheets_mode_errors = []
+
+    if order_qty_unit == "Sheets":
+        if len(grade_names) != 1:
+            sheets_mode_errors.append("Sheets mode: select exactly one Grade Name.")
+        if len(basis_weights) != 1:
+            sheets_mode_errors.append("Sheets mode: select exactly one Basis Weight.")
+        if not sheet_width_input or not sheet_length_input:
+            sheets_mode_errors.append("Sheets mode: Sheet Width and Sheet Length are required.")
+        if order_quantity <= 0:
+            sheets_mode_errors.append("Sheets mode: enter a positive Order Quantity in sheets.")
+
+        area_in_for_conv = None
+        bw_for_conv = None
+        w_for_conv = None
+        l_for_conv = None
+        if not sheets_mode_errors:
+            try:
+                w_for_conv = float(str(sheet_width_input).strip())
+                l_for_conv = float(str(sheet_length_input).strip())
+            except ValueError:
+                sheets_mode_errors.append("Sheets mode: Sheet Width and Sheet Length must be numeric.")
+            try:
+                bw_for_conv = float(basis_weights[0])
+            except (TypeError, ValueError):
+                sheets_mode_errors.append("Sheets mode: Basis Weight must be numeric.")
+            if grade_df is not None and "Description" in grade_df.columns:
+                gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
+                if not gm.empty:
+                    area_val = gm.iloc[0].get("Area(IN)")
+                    if pd.notna(area_val) and float(area_val) > 0:
+                        area_in_for_conv = float(area_val)
+            if area_in_for_conv is None:
+                sheets_mode_errors.append(
+                    f"Sheets mode: could not find Area(IN) for grade '{grade_names[0]}' in the Grade table."
+                )
+
+        if sheets_mode_errors:
+            for err in sheets_mode_errors:
+                st.error(err)
+            st.stop()
+
+        order_quantity_sheets = int(order_quantity)
+        order_quantity_lbs = (
+            order_quantity_sheets * w_for_conv * l_for_conv * bw_for_conv
+        ) / (500.0 * area_in_for_conv)
+
     # new search → persist params and clear selections
     st.session_state.search_params = {
         "warehouse_group": warehouse_group,
@@ -1098,7 +1163,9 @@ if search_btn:
         "sheet_width_input": sheet_width_input,
         "sheet_length_input": sheet_length_input,
         "max_waste_pct": max_waste_pct,
-        "order_quantity": order_quantity,
+        "order_quantity": order_quantity_lbs,
+        "order_qty_unit": order_qty_unit,
+        "order_quantity_sheets": order_quantity_sheets,
     }
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_sheets_idx = set()
@@ -1891,7 +1958,17 @@ with c6:
 with c7:
     st.metric("Est. Sheets", f"{est_sheets:,.0f}" if est_sheets is not None else "—")
 with c8:
-    st.metric("Order Qty", f"{order_quantity_param:,.0f} lbs" if order_quantity_param else "—")
+    if order_quantity_param:
+        sheets_param = st.session_state.search_params.get("order_quantity_sheets")
+        if st.session_state.search_params.get("order_qty_unit") == "Sheets" and sheets_param:
+            oq_value = f"{sheets_param:,} sht"
+            oq_help = f"≈ {order_quantity_param:,.0f} lbs (converted from {sheets_param:,} sheets)"
+        else:
+            oq_value = f"{order_quantity_param:,.0f} lbs"
+            oq_help = None
+        st.metric("Order Qty", oq_value, help=oq_help)
+    else:
+        st.metric("Order Qty", "—")
 with c9:
     st.metric(
         "Order Qty Cost",
