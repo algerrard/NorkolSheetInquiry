@@ -737,6 +737,13 @@ with st.container():
             else []
         )
         basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)", key=f"fld_basis_weights_{rc}")
+        basis_wt_unit = st.radio(
+            "Basis Weight Unit",
+            options=["LBS", "GSM"],
+            horizontal=True,
+            help="Unit of the basis weight you entered. GSM values are converted to LBS using the grade's GSM factor before MWeight / order-weight calculations.",
+            key=f"fld_basis_wt_unit_{rc}",
+        )
 
         if "Caliper" in df.columns:
             caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
@@ -796,12 +803,16 @@ with st.container():
                 preview_missing.append("Sheet Length")
 
             _area_pv = None
+            _gsm_factor_pv = None
             if len(grade_names) == 1 and grade_df is not None and "Description" in grade_df.columns:
                 _gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
                 if not _gm.empty:
                     _av = _gm.iloc[0].get("Area(IN)")
                     if pd.notna(_av) and float(_av) > 0:
                         _area_pv = float(_av)
+                    _gv = _gm.iloc[0].get("GSM")
+                    if pd.notna(_gv) and float(_gv) > 0:
+                        _gsm_factor_pv = float(_gv)
 
             if (
                 not preview_missing
@@ -812,10 +823,19 @@ with st.container():
             ):
                 try:
                     _bw_pv = float(basis_weights[0])
-                    preview_lbs = (int(order_quantity) * _w_pv * _l_pv * _bw_pv) / (500.0 * _area_pv)
-                    preview_mweight = (preview_lbs / int(order_quantity)) * 1000.0
+                    if basis_wt_unit == "GSM":
+                        if _gsm_factor_pv:
+                            _bw_pv = _bw_pv / _gsm_factor_pv
+                        else:
+                            _bw_pv = None
+                    if _bw_pv is not None:
+                        preview_lbs = (int(order_quantity) * _w_pv * _l_pv * _bw_pv) / (500.0 * _area_pv)
+                        preview_mweight = (preview_lbs / int(order_quantity)) * 1000.0
                 except (TypeError, ValueError):
                     pass
+
+            if basis_wt_unit == "GSM" and len(grade_names) == 1 and _gsm_factor_pv is None:
+                st.caption("⚠️ GSM mode: no GSM factor found for the selected grade — MWeight/lbs preview disabled.")
 
             if preview_mweight is not None and preview_lbs is not None:
                 pc1, pc2 = st.columns(2)
@@ -1324,6 +1344,7 @@ if search_btn:
         bw_for_conv = None
         w_for_conv = None
         l_for_conv = None
+        gsm_factor_for_conv = None
         if not sheets_mode_errors:
             try:
                 w_for_conv = float(str(sheet_width_input).strip())
@@ -1340,10 +1361,20 @@ if search_btn:
                     area_val = gm.iloc[0].get("Area(IN)")
                     if pd.notna(area_val) and float(area_val) > 0:
                         area_in_for_conv = float(area_val)
+                    gsm_val = gm.iloc[0].get("GSM")
+                    if pd.notna(gsm_val) and float(gsm_val) > 0:
+                        gsm_factor_for_conv = float(gsm_val)
             if area_in_for_conv is None:
                 sheets_mode_errors.append(
                     f"Sheets mode: could not find Area(IN) for grade '{grade_names[0]}' in the Grade table."
                 )
+            if basis_wt_unit == "GSM":
+                if gsm_factor_for_conv:
+                    bw_for_conv = bw_for_conv / gsm_factor_for_conv
+                else:
+                    sheets_mode_errors.append(
+                        f"Sheets mode (GSM): no GSM factor found for grade '{grade_names[0]}' in the Grade table."
+                    )
 
         if sheets_mode_errors:
             for err in sheets_mode_errors:
