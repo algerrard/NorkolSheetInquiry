@@ -398,7 +398,8 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 # =========================================================
 # PDF REPORT GENERATION
 # =========================================================
-def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selected_alt_rolls, summary_data):
+def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selected_alt_rolls,
+                        summary_data, detail_sheets=None, detail_rolls=None):
     """
     Generate a PDF quote report with parameters, selected lines, and summary.
     Returns PDF as bytes.
@@ -522,6 +523,80 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
     add_lines_table("Exact Matches Selected", selected_exact, table_type="exact")
     add_lines_table("Alternative Sheets Selected", selected_alt_sheets, table_type="alt_sheets")
     add_lines_table("Alternative Rolls Selected", selected_alt_rolls, table_type="alt_rolls")
+
+    # ---- Individual rolls picked in the detail expanders ----
+    def add_rolls_detail_table(title, df, kind="rolls"):
+        if df is None or df.empty:
+            return
+        if kind == "sheets":
+            cols = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "SheetWidth", "SheetLength", "Mill", "QtyOnHand", "CostPerCWT"]
+            headers = ["Lot", "Roll#", "Grade", "BWt", "Cal",
+                       "ShW", "ShL", "Mill", "Qty", "$/CWT"]
+        else:
+            cols = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "Roll_Width", "Diameter", "Mill", "QtyOnHand", "CostPerCWT"]
+            headers = ["Lot", "Roll#", "Grade", "BWt", "Cal",
+                       "Width", "Dia", "Mill", "Qty", "$/CWT"]
+
+        available = [c for c in cols if c in df.columns]
+        if not available:
+            return
+        available_headers = [headers[cols.index(c)] for c in available]
+
+        story.append(Paragraph(title, styles['Heading3']))
+        story.append(Spacer(1, 6))
+
+        table_data = [available_headers]
+        for _, row in df.iterrows():
+            row_data = []
+            for col in available:
+                val = row.get(col)
+                try:
+                    if val is None or pd.isna(val):
+                        row_data.append('')
+                    elif col == "QtyOnHand":
+                        row_data.append(f"{float(val):,.0f}")
+                    elif col == "BasisWt":
+                        row_data.append(f"{float(val):.0f}")
+                    elif col == "Caliper":
+                        row_data.append(f"{float(val):.4f}")
+                    elif col in ("Roll_Width", "SheetWidth", "SheetLength"):
+                        row_data.append(f"{float(val):.2f}")
+                    elif col == "Diameter":
+                        row_data.append(f"{float(val):.0f}")
+                    elif col == "CostPerCWT":
+                        row_data.append(f"${float(val):.2f}")
+                    elif col == "GradeName":
+                        row_data.append(str(val)[:12] if val else '')
+                    elif col == "Mill":
+                        row_data.append(str(val)[:10] if val else '')
+                    else:
+                        row_data.append(str(val)[:10] if val else '')
+                except (ValueError, TypeError):
+                    row_data.append('')
+            table_data.append(row_data)
+
+        col_width = 7.3 * inch / len(available)
+        detail_table = Table(table_data, colWidths=[col_width] * len(available), repeatRows=1)
+        detail_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.darkgrey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 7),
+            ('FONTSIZE', (0, 1), (-1, -1), 6.5),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('LEFTPADDING', (0, 0), (-1, -1), 2),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        story.append(detail_table)
+        story.append(Spacer(1, 14))
+
+    add_rolls_detail_table("Selected Alt-Sheet Rolls (detail)", detail_sheets, kind="sheets")
+    add_rolls_detail_table("Selected Alt Rolls (detail)", detail_rolls, kind="rolls")
     
     # Summary Section
     story.append(Paragraph("Quote Summary", styles['Heading2']))
@@ -2220,6 +2295,20 @@ export_df = pd.concat([selected_exact, selected_alt_sheets, selected_alt_rolls],
     not selected_exact.empty or not selected_alt_sheets.empty or not selected_alt_rolls.empty
 ) else pd.DataFrame()
 
+# Build per-roll detail (the individual rolls the user kept checked in the detail expanders)
+def _build_detail_rows(raw, detail_ids):
+    if raw is None or raw.empty or not detail_ids:
+        return pd.DataFrame()
+    out = raw[raw["_detail_id"].astype(int).isin(detail_ids)].copy()
+    if "InvValue" in out.columns and "QtyOnHand" in out.columns:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["CostPerCWT"] = (out["InvValue"] / out["QtyOnHand"]) * 100.0
+            out["CostPerCWT"] = out["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
+    return out
+
+detail_sheets_df = _build_detail_rows(alt_sheets_raw, st.session_state.sel_alt_sheets_detail)
+detail_rolls_df = _build_detail_rows(alt_rolls_raw, st.session_state.sel_alt_rolls_detail)
+
 if not export_df.empty:
     # Build basis weight token for filename (use first selected or empty if none/multiple)
     params = st.session_state.search_params
@@ -2289,7 +2378,22 @@ if not export_df.empty:
         f"Order Qty Cost / CWT,${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "Order Qty Cost / CWT,—",
         f"Order Qty Cost / M Sheets,${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "Order Qty Cost / M Sheets,—",
     ])
-    csv_with_summary = csv_body + "\n".join(footer_rows) + "\n"
+    # Append selected per-roll detail to the CSV (after the aggregated rows, before the summary)
+    detail_section = ""
+    detail_cols_sheets = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                          "SheetWidth", "SheetLength", "Mill", "Warehouse", "QtyOnHand", "CostPerCWT"]
+    detail_cols_rolls = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                         "Roll_Width", "Diameter", "Mill", "Warehouse", "QtyOnHand", "CostPerCWT"]
+    if not detail_sheets_df.empty:
+        cols_present = [c for c in detail_cols_sheets if c in detail_sheets_df.columns]
+        detail_section += "\nSelected Alt-Sheet Rolls (detail)\n"
+        detail_section += detail_sheets_df[cols_present].to_csv(index=False)
+    if not detail_rolls_df.empty:
+        cols_present = [c for c in detail_cols_rolls if c in detail_rolls_df.columns]
+        detail_section += "\nSelected Alt Rolls (detail)\n"
+        detail_section += detail_rolls_df[cols_present].to_csv(index=False)
+
+    csv_with_summary = csv_body + detail_section + "\n".join(footer_rows) + "\n"
 
     # Export buttons side by side
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
@@ -2308,7 +2412,9 @@ if not export_df.empty:
             selected_exact,
             selected_alt_sheets,
             selected_alt_rolls,
-            summary_data
+            summary_data,
+            detail_sheets=detail_sheets_df,
+            detail_rolls=detail_rolls_df,
         )
 
         st.download_button(
