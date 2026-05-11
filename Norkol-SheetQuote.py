@@ -596,7 +596,7 @@ st.title("🔍 Norkol Sheet Stock Search")
 # =========================================================
 # SEARCH FORM
 # =========================================================
-with st.form("search_form"):
+with st.container():
     col1, col2 = st.columns(2)
 
     with col1:
@@ -668,11 +668,60 @@ with st.form("search_form"):
                 "plus Sheet Width and Sheet Length."
             )
 
+            preview_mweight = None
+            preview_lbs = None
+            preview_missing = []
+            if len(grade_names) != 1:
+                preview_missing.append("one Grade Name")
+            if len(basis_weights) != 1:
+                preview_missing.append("one Basis Weight")
+            try:
+                _w_pv = float(str(sheet_width_input).strip()) if sheet_width_input else None
+            except ValueError:
+                _w_pv = None
+            try:
+                _l_pv = float(str(sheet_length_input).strip()) if sheet_length_input else None
+            except ValueError:
+                _l_pv = None
+            if not _w_pv:
+                preview_missing.append("Sheet Width")
+            if not _l_pv:
+                preview_missing.append("Sheet Length")
+
+            _area_pv = None
+            if len(grade_names) == 1 and grade_df is not None and "Description" in grade_df.columns:
+                _gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
+                if not _gm.empty:
+                    _av = _gm.iloc[0].get("Area(IN)")
+                    if pd.notna(_av) and float(_av) > 0:
+                        _area_pv = float(_av)
+
+            if (
+                not preview_missing
+                and order_quantity
+                and order_quantity > 0
+                and _area_pv
+                and len(basis_weights) == 1
+            ):
+                try:
+                    _bw_pv = float(basis_weights[0])
+                    preview_lbs = (int(order_quantity) * _w_pv * _l_pv * _bw_pv) / (500.0 * _area_pv)
+                    preview_mweight = (preview_lbs / int(order_quantity)) * 1000.0
+                except (TypeError, ValueError):
+                    pass
+
+            if preview_mweight is not None and preview_lbs is not None:
+                pc1, pc2 = st.columns(2)
+                with pc1:
+                    st.metric("MWeight (lbs/1000 sheets)", f"{preview_mweight:,.1f}")
+                with pc2:
+                    st.metric("Estimated lbs", f"{preview_lbs:,.0f}")
+
     c1, c2 = st.columns([1, 3])
     with c1:
-        search_btn = st.form_submit_button("🔍 Search", use_container_width=True)
+        search_btn = st.button("🔍 Search", use_container_width=True)
     with c2:
-        reset_btn = st.form_submit_button("🔄 Reset", use_container_width=True)
+        reset_btn = st.button("🔄 Reset", use_container_width=True)
 
 if reset_btn:
     for k in list(st.session_state.keys()):
