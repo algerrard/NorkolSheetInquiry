@@ -8,7 +8,7 @@ import os
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.units import inch
 
 # =========================================================
@@ -595,9 +595,6 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         story.append(detail_table)
         story.append(Spacer(1, 14))
 
-    add_rolls_detail_table("Selected Alt-Sheet Rolls (detail)", detail_sheets, kind="sheets")
-    add_rolls_detail_table("Selected Alt Rolls (detail)", detail_rolls, kind="rolls")
-    
     # Summary Section
     story.append(Paragraph("Quote Summary", styles['Heading2']))
     story.append(Spacer(1, 10))
@@ -645,7 +642,17 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
     ]))
     story.append(summary_table)
-    
+
+    # Per-roll detail (potentially lengthy) — push to a new page so the summary stays on page 1
+    has_detail = (
+        (detail_sheets is not None and not detail_sheets.empty)
+        or (detail_rolls is not None and not detail_rolls.empty)
+    )
+    if has_detail:
+        story.append(PageBreak())
+        add_rolls_detail_table("Selected Alt-Sheet Rolls (detail)", detail_sheets, kind="sheets")
+        add_rolls_detail_table("Selected Alt Rolls (detail)", detail_rolls, kind="rolls")
+
     # Build PDF
     doc.build(story)
     buffer.seek(0)
