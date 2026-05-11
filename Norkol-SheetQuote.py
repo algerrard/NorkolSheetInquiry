@@ -904,8 +904,12 @@ def run_search(params):
         roll_data["Roll_Width"] = pd.to_numeric(roll_data["Roll_Width"], errors="coerce")
         roll_data = roll_data.dropna(subset=["Roll_Width"])
 
-        # Rolls must be >= requested width to cut sheets
-        suitable_rolls = roll_data[roll_data["Roll_Width"] >= requested_width].copy()
+        # Rolls must be >= requested width to cut sheets, and <= 65" (Sheeter max)
+        SHEETER_MAX_ROLL_WIDTH = 65.0
+        suitable_rolls = roll_data[
+            (roll_data["Roll_Width"] >= requested_width)
+            & (roll_data["Roll_Width"] <= SHEETER_MAX_ROLL_WIDTH)
+        ].copy()
         
         if len(suitable_rolls) > 0:
             # Calculate how many sheets can be cut across the width
