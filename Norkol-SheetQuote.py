@@ -1709,13 +1709,28 @@ if not alternative_sheets.empty:
                 # Key changes when the visible-row set changes, so stale edits
                 # from a different aggregate selection can't bleed onto new rows.
                 _vid_sh = tuple(sorted(editor_df["_detail_id"].astype(int).tolist()))
+                _editor_key_sh = f"alt_sheets_detail_editor_{hash(_vid_sh)}"
+
+                _btn_col_sh, _ = st.columns([1, 5])
+                with _btn_col_sh:
+                    if st.button("☐ Unselect All", key=f"unsel_all_sheets_{hash(_vid_sh)}"):
+                        st.session_state.sel_alt_sheets_detail -= set(_vid_sh)
+                        if _editor_key_sh in st.session_state:
+                            del st.session_state[_editor_key_sh]
+                        st.rerun()
+
+                # Refresh the Selected column from session state (Unselect All may have just modified it)
+                editor_df["Selected"] = editor_df["_detail_id"].astype(int).isin(
+                    st.session_state.sel_alt_sheets_detail
+                )
+
                 edited = st.data_editor(
                     editor_df,
                     column_config=col_config,
                     disabled=[c for c in editor_df.columns if c != "Selected"],
                     hide_index=True,
                     use_container_width=True,
-                    key=f"alt_sheets_detail_editor_{hash(_vid_sh)}",
+                    key=_editor_key_sh,
                 )
 
                 visible_ids = set(_vid_sh)
@@ -1916,13 +1931,28 @@ if not alternative_rolls.empty:
                     col_config["CostPerCWT"] = st.column_config.NumberColumn("Cost/CWT", format="$%.2f")
 
                 _vid_rl = tuple(sorted(editor_df["_detail_id"].astype(int).tolist()))
+                _editor_key_rl = f"alt_rolls_detail_editor_{hash(_vid_rl)}"
+
+                _btn_col_rl, _ = st.columns([1, 5])
+                with _btn_col_rl:
+                    if st.button("☐ Unselect All", key=f"unsel_all_rolls_{hash(_vid_rl)}"):
+                        st.session_state.sel_alt_rolls_detail -= set(_vid_rl)
+                        if _editor_key_rl in st.session_state:
+                            del st.session_state[_editor_key_rl]
+                        st.rerun()
+
+                # Refresh the Selected column from session state (Unselect All may have just modified it)
+                editor_df["Selected"] = editor_df["_detail_id"].astype(int).isin(
+                    st.session_state.sel_alt_rolls_detail
+                )
+
                 edited = st.data_editor(
                     editor_df,
                     column_config=col_config,
                     disabled=[c for c in editor_df.columns if c != "Selected"],
                     hide_index=True,
                     use_container_width=True,
-                    key=f"alt_rolls_detail_editor_{hash(_vid_rl)}",
+                    key=_editor_key_rl,
                 )
 
                 visible_ids = set(_vid_rl)
