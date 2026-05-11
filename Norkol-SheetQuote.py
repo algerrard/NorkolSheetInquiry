@@ -527,6 +527,9 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
     order_qty = summary_data.get('order_qty')
     order_qty_cost_cwt = summary_data.get('order_qty_cost_cwt')
     order_qty_cost_per_m = summary_data.get('order_qty_cost_per_m')
+    freight_total = summary_data.get('freight_total')
+    freight_cwt = summary_data.get('freight_cwt')
+    freight_per_m = summary_data.get('freight_per_m')
 
     summary_table_data = [
         ["Exact Qty Selected:", f"{exact_lbs:,.0f} lbs"],
@@ -537,9 +540,17 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Cost Per M Sheets:", f"${cost_per_m:,.2f}" if cost_per_m else "—"],
         ["Estimated Sheets:", f"{est_sheets:,.0f}" if est_sheets else "—"],
         ["Order Qty:", f"{order_qty:,.0f} lbs" if order_qty else "—"],
+    ]
+    if freight_total:
+        summary_table_data.extend([
+            ["Freight Total:", f"${freight_total:,.2f}"],
+            ["Freight / CWT:", f"${freight_cwt:,.2f}" if freight_cwt else "—"],
+            ["Freight / M Sheets:", f"${freight_per_m:,.2f}" if freight_per_m else "—"],
+        ])
+    summary_table_data.extend([
         ["Order Qty Cost / CWT:", f"${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "—"],
         ["Order Qty Cost / M Sheets:", f"${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "—"],
-    ]
+    ])
     
     summary_table = Table(summary_table_data, colWidths=[2*inch, 2*inch])
     summary_table.setStyle(TableStyle([
@@ -716,6 +727,16 @@ with st.container():
                     st.metric("MWeight (lbs/1000 sheets)", f"{preview_mweight:,.1f}")
                 with pc2:
                     st.metric("Estimated lbs", f"{preview_lbs:,.0f}")
+
+        freight_cost = st.number_input(
+            "Freight Cost (total $, optional)",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
+            format="%.2f",
+            help="Total freight expense for the order. Added to summary cost as $/CWT and $/M sheets.",
+            key=f"fld_freight_cost_{rc}",
+        )
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -1980,6 +2001,18 @@ if (
     if mweight and mweight > 0:
         order_qty_cost_per_m = order_qty_cost_cwt * 0.01 * mweight
 
+# --- Freight: convert total $ to $/CWT and fold into Order Qty Cost ---
+freight_cwt = 0.0
+freight_per_m = 0.0
+if freight_cost and freight_cost > 0 and order_quantity_param and order_quantity_param > 0:
+    freight_cwt = (freight_cost / order_quantity_param) * 100.0
+    if mweight and mweight > 0:
+        freight_per_m = freight_cwt * 0.01 * mweight
+    if order_qty_cost_cwt is not None:
+        order_qty_cost_cwt += freight_cwt
+    if order_qty_cost_per_m is not None:
+        order_qty_cost_per_m += freight_per_m
+
 # Shrink metric label/value fonts so 10 columns fit without wrapping
 st.markdown(
     """
@@ -2019,14 +2052,18 @@ with c8:
     else:
         st.metric("Order Qty", "—")
 with c9:
+    cwt_help = f"Includes ${freight_cwt:,.2f}/CWT freight (${freight_cost:,.2f} total)" if freight_cwt > 0 else None
     st.metric(
         "Order Qty Cost",
         f"${order_qty_cost_cwt:,.2f} / CWT" if order_qty_cost_cwt is not None else "— / CWT",
+        help=cwt_help,
     )
 with c10:
+    per_m_help = f"Includes ${freight_per_m:,.2f}/M sheets freight (${freight_cost:,.2f} total)" if freight_per_m > 0 else None
     st.metric(
         "Order Qty Cost",
         f"${order_qty_cost_per_m:,.2f} / M Sheets" if order_qty_cost_per_m is not None else "— / M Sheets",
+        help=per_m_help,
     )
 
 if mweight_error:
@@ -2080,6 +2117,9 @@ if not export_df.empty:
         "order_qty": order_quantity_param,
         "order_qty_cost_cwt": order_qty_cost_cwt,
         "order_qty_cost_per_m": order_qty_cost_per_m,
+        "freight_total": freight_cost if freight_cost and freight_cost > 0 else None,
+        "freight_cwt": freight_cwt if freight_cwt > 0 else None,
+        "freight_per_m": freight_per_m if freight_per_m > 0 else None,
     }
 
     # Build CSV: per-row data + summary footer
@@ -2095,9 +2135,17 @@ if not export_df.empty:
         f"Cost Per M Sheets,${cost_per_m:,.2f}" if cost_per_m is not None else "Cost Per M Sheets,—",
         f"Estimated Sheets,{est_sheets:,.0f}" if est_sheets is not None else "Estimated Sheets,—",
         f"Order Qty,{order_quantity_param:,.0f} lbs" if order_quantity_param else "Order Qty,—",
+    ]
+    if freight_cwt > 0:
+        footer_rows.extend([
+            f"Freight Total,${freight_cost:,.2f}",
+            f"Freight / CWT,${freight_cwt:,.2f}",
+            f"Freight / M Sheets,${freight_per_m:,.2f}",
+        ])
+    footer_rows.extend([
         f"Order Qty Cost / CWT,${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "Order Qty Cost / CWT,—",
         f"Order Qty Cost / M Sheets,${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "Order Qty Cost / M Sheets,—",
-    ]
+    ])
     csv_with_summary = csv_body + "\n".join(footer_rows) + "\n"
 
     # Export buttons side by side
