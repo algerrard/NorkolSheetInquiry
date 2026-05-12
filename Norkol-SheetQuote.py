@@ -1758,6 +1758,7 @@ else:
 # DISPLAY: ALTERNATIVE ROLLS
 # =========================================================
 st.subheader("🎞️ Alternative Rolls")
+st.caption("Maximum roll width presented = 65 inch")
 if not alternative_rolls.empty:
     # Ensure required computed columns exist
     for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct"]:
