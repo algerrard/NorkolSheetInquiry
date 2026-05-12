@@ -8,7 +8,7 @@ import os
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.units import inch
 
 # =========================================================
@@ -44,6 +44,16 @@ if "sel_alt_sheets_idx" not in st.session_state:
     st.session_state.sel_alt_sheets_idx = set()
 if "sel_alt_rolls_idx" not in st.session_state:
     st.session_state.sel_alt_rolls_idx = set()
+# Per-individual-roll selection within the detail expanders
+if "sel_alt_sheets_detail" not in st.session_state:
+    st.session_state.sel_alt_sheets_detail = set()
+if "sel_alt_rolls_detail" not in st.session_state:
+    st.session_state.sel_alt_rolls_detail = set()
+# Tracks which aggregate groups have already had their rolls auto-populated
+if "seen_alt_sheets_groups" not in st.session_state:
+    st.session_state.seen_alt_sheets_groups = set()
+if "seen_alt_rolls_groups" not in st.session_state:
+    st.session_state.seen_alt_rolls_groups = set()
 if "search_params" not in st.session_state:
     st.session_state.search_params = {}
 
@@ -388,7 +398,8 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 # =========================================================
 # PDF REPORT GENERATION
 # =========================================================
-def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selected_alt_rolls, summary_data):
+def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selected_alt_rolls,
+                        summary_data, detail_sheets=None, detail_rolls=None):
     """
     Generate a PDF quote report with parameters, selected lines, and summary.
     Returns PDF as bytes.
@@ -422,7 +433,11 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Sheet Width:", f"{search_params.get('sheet_width_input')}\"" if search_params.get("sheet_width_input") else "Not specified"],
         ["Sheet Length:", f"{search_params.get('sheet_length_input')}\"" if search_params.get("sheet_length_input") else "Not specified"],
         ["Max Waste %:", f"{search_params.get('max_waste_pct')}%" if search_params.get("max_waste_pct") is not None else "Not specified"],
-        ["Order Quantity:", f"{search_params.get('order_quantity'):,} lbs" if search_params.get("order_quantity") else "Not specified"],
+        ["Order Quantity:", (
+            f"{search_params.get('order_quantity_sheets'):,} sheets ({search_params.get('order_quantity'):,.0f} lbs)"
+            if search_params.get("order_qty_unit") == "Sheets" and search_params.get("order_quantity_sheets")
+            else f"{search_params.get('order_quantity'):,.0f} lbs"
+        ) if search_params.get("order_quantity") else "Not specified"],
     ]
     
     param_table = Table(param_data, colWidths=[1.5*inch, 4*inch])
@@ -508,7 +523,78 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
     add_lines_table("Exact Matches Selected", selected_exact, table_type="exact")
     add_lines_table("Alternative Sheets Selected", selected_alt_sheets, table_type="alt_sheets")
     add_lines_table("Alternative Rolls Selected", selected_alt_rolls, table_type="alt_rolls")
-    
+
+    # ---- Individual rolls picked in the detail expanders ----
+    def add_rolls_detail_table(title, df, kind="rolls"):
+        if df is None or df.empty:
+            return
+        if kind == "sheets":
+            cols = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "SheetWidth", "SheetLength", "Mill", "QtyOnHand", "CostPerCWT"]
+            headers = ["Lot", "Roll#", "Grade", "BWt", "Cal",
+                       "ShW", "ShL", "Mill", "Qty", "$/CWT"]
+        else:
+            cols = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "Roll_Width", "Diameter", "Mill", "QtyOnHand", "CostPerCWT"]
+            headers = ["Lot", "Roll#", "Grade", "BWt", "Cal",
+                       "Width", "Dia", "Mill", "Qty", "$/CWT"]
+
+        available = [c for c in cols if c in df.columns]
+        if not available:
+            return
+        available_headers = [headers[cols.index(c)] for c in available]
+
+        story.append(Paragraph(title, styles['Heading3']))
+        story.append(Spacer(1, 6))
+
+        table_data = [available_headers]
+        for _, row in df.iterrows():
+            row_data = []
+            for col in available:
+                val = row.get(col)
+                try:
+                    if val is None or pd.isna(val):
+                        row_data.append('')
+                    elif col == "QtyOnHand":
+                        row_data.append(f"{float(val):,.0f}")
+                    elif col == "BasisWt":
+                        row_data.append(f"{float(val):.0f}")
+                    elif col == "Caliper":
+                        row_data.append(f"{float(val):.4f}")
+                    elif col in ("Roll_Width", "SheetWidth", "SheetLength"):
+                        row_data.append(f"{float(val):.2f}")
+                    elif col == "Diameter":
+                        row_data.append(f"{float(val):.0f}")
+                    elif col == "CostPerCWT":
+                        row_data.append(f"${float(val):.2f}")
+                    elif col == "GradeName":
+                        row_data.append(str(val)[:12] if val else '')
+                    elif col == "Mill":
+                        row_data.append(str(val)[:10] if val else '')
+                    else:
+                        row_data.append(str(val)[:10] if val else '')
+                except (ValueError, TypeError):
+                    row_data.append('')
+            table_data.append(row_data)
+
+        col_width = 7.3 * inch / len(available)
+        detail_table = Table(table_data, colWidths=[col_width] * len(available), repeatRows=1)
+        detail_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.darkgrey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 7),
+            ('FONTSIZE', (0, 1), (-1, -1), 6.5),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('LEFTPADDING', (0, 0), (-1, -1), 2),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        story.append(detail_table)
+        story.append(Spacer(1, 14))
+
     # Summary Section
     story.append(Paragraph("Quote Summary", styles['Heading2']))
     story.append(Spacer(1, 10))
@@ -520,16 +606,33 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
     blended_cwt = summary_data.get('blended_cwt') or 0
     cost_per_m = summary_data.get('cost_per_m')
     est_sheets = summary_data.get('est_sheets')
-    
+    order_qty = summary_data.get('order_qty')
+    order_qty_cost_cwt = summary_data.get('order_qty_cost_cwt')
+    order_qty_cost_per_m = summary_data.get('order_qty_cost_per_m')
+    freight_total = summary_data.get('freight_total')
+    freight_cwt = summary_data.get('freight_cwt')
+    freight_per_m = summary_data.get('freight_per_m')
+
     summary_table_data = [
         ["Exact Qty Selected:", f"{exact_lbs:,.0f} lbs"],
         ["Alt Yield Selected:", f"{alt_yield:,.0f} lbs"],
-        ["Total Usable Weight:", f"{total_lbs:,.0f} lbs"],
+        ["Total Estimated Yield:", f"{total_lbs:,.0f} lbs"],
         ["Mweight:", f"{mweight:,.0f} lbs" if mweight else "—"],
         ["Blended Cost / CWT:", f"${blended_cwt:,.2f}"],
         ["Cost Per M Sheets:", f"${cost_per_m:,.2f}" if cost_per_m else "—"],
         ["Estimated Sheets:", f"{est_sheets:,.0f}" if est_sheets else "—"],
+        ["Order Qty:", f"{order_qty:,.0f} lbs" if order_qty else "—"],
     ]
+    if freight_total:
+        summary_table_data.extend([
+            ["Freight Total:", f"${freight_total:,.2f}"],
+            ["Freight / CWT:", f"${freight_cwt:,.2f}" if freight_cwt else "—"],
+            ["Freight / M Sheets:", f"${freight_per_m:,.2f}" if freight_per_m else "—"],
+        ])
+    summary_table_data.extend([
+        ["Order Qty Cost / CWT:", f"${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "—"],
+        ["Order Qty Cost / M Sheets:", f"${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "—"],
+    ])
     
     summary_table = Table(summary_table_data, colWidths=[2*inch, 2*inch])
     summary_table.setStyle(TableStyle([
@@ -539,7 +642,17 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
     ]))
     story.append(summary_table)
-    
+
+    # Per-roll detail (potentially lengthy) — push to a new page so the summary stays on page 1
+    has_detail = (
+        (detail_sheets is not None and not detail_sheets.empty)
+        or (detail_rolls is not None and not detail_rolls.empty)
+    )
+    if has_detail:
+        story.append(PageBreak())
+        add_rolls_detail_table("Selected Alt-Sheet Rolls (detail)", detail_sheets, kind="sheets")
+        add_rolls_detail_table("Selected Alt Rolls (detail)", detail_rolls, kind="rolls")
+
     # Build PDF
     doc.build(story)
     buffer.seek(0)
@@ -567,6 +680,10 @@ with st.sidebar:
         st.session_state.sel_exact_idx = set()
         st.session_state.sel_alt_sheets_idx = set()
         st.session_state.sel_alt_rolls_idx = set()
+        st.session_state.sel_alt_sheets_detail = set()
+        st.session_state.sel_alt_rolls_detail = set()
+        st.session_state.seen_alt_sheets_groups = set()
+        st.session_state.seen_alt_rolls_groups = set()
         st.session_state.search_params = {}
         st.rerun()
     if last_refresh:
@@ -586,7 +703,7 @@ st.title("🔍 Norkol Sheet Stock Search")
 # =========================================================
 # SEARCH FORM
 # =========================================================
-with st.form("search_form"):
+with st.container():
     col1, col2 = st.columns(2)
 
     with col1:
@@ -620,6 +737,13 @@ with st.form("search_form"):
             else []
         )
         basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)", key=f"fld_basis_weights_{rc}")
+        basis_wt_unit = st.radio(
+            "Basis Weight Unit",
+            options=["LBS", "GSM"],
+            horizontal=True,
+            help="Unit of the basis weight you entered. GSM values are converted to LBS using the grade's GSM factor before MWeight / order-weight calculations.",
+            key=f"fld_basis_wt_unit_{rc}",
+        )
 
         if "Caliper" in df.columns:
             caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
@@ -639,18 +763,102 @@ with st.form("search_form"):
             step=1.0,
             key=f"fld_max_waste_pct_{rc}",
         )
+        order_qty_unit = st.radio(
+            "Order Quantity Unit",
+            options=["LBS", "Sheets"],
+            horizontal=True,
+            key=f"fld_order_qty_unit_{rc}",
+        )
+        qty_label = "Order Quantity (sheets) *" if order_qty_unit == "Sheets" else "Order Quantity (lbs) *"
         order_quantity = st.number_input(
-            "Order Quantity (lbs) *",
+            qty_label,
             min_value=0,
             value=0,
             key=f"fld_order_quantity_{rc}",
         )
+        if order_qty_unit == "Sheets":
+            st.caption(
+                "Sheets mode requires exactly one Grade Name and one Basis Weight selected, "
+                "plus Sheet Width and Sheet Length."
+            )
+
+            preview_mweight = None
+            preview_lbs = None
+            preview_missing = []
+            if len(grade_names) != 1:
+                preview_missing.append("one Grade Name")
+            if len(basis_weights) != 1:
+                preview_missing.append("one Basis Weight")
+            try:
+                _w_pv = float(str(sheet_width_input).strip()) if sheet_width_input else None
+            except ValueError:
+                _w_pv = None
+            try:
+                _l_pv = float(str(sheet_length_input).strip()) if sheet_length_input else None
+            except ValueError:
+                _l_pv = None
+            if not _w_pv:
+                preview_missing.append("Sheet Width")
+            if not _l_pv:
+                preview_missing.append("Sheet Length")
+
+            _area_pv = None
+            _gsm_factor_pv = None
+            if len(grade_names) == 1 and grade_df is not None and "Description" in grade_df.columns:
+                _gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
+                if not _gm.empty:
+                    _av = _gm.iloc[0].get("Area(IN)")
+                    if pd.notna(_av) and float(_av) > 0:
+                        _area_pv = float(_av)
+                    _gv = _gm.iloc[0].get("GSM")
+                    if pd.notna(_gv) and float(_gv) > 0:
+                        _gsm_factor_pv = float(_gv)
+
+            if (
+                not preview_missing
+                and order_quantity
+                and order_quantity > 0
+                and _area_pv
+                and len(basis_weights) == 1
+            ):
+                try:
+                    _bw_pv = float(basis_weights[0])
+                    if basis_wt_unit == "GSM":
+                        if _gsm_factor_pv:
+                            _bw_pv = _bw_pv / _gsm_factor_pv
+                        else:
+                            _bw_pv = None
+                    if _bw_pv is not None:
+                        preview_lbs = (int(order_quantity) * _w_pv * _l_pv * _bw_pv) / (500.0 * _area_pv)
+                        preview_mweight = (preview_lbs / int(order_quantity)) * 1000.0
+                except (TypeError, ValueError):
+                    pass
+
+            if basis_wt_unit == "GSM" and len(grade_names) == 1 and _gsm_factor_pv is None:
+                st.caption("⚠️ GSM mode: no GSM factor found for the selected grade — MWeight/lbs preview disabled.")
+
+            if preview_mweight is not None and preview_lbs is not None:
+                pc1, pc2 = st.columns(2)
+                with pc1:
+                    st.metric("MWeight (lbs/1000 sheets)", f"{preview_mweight:,.1f}")
+                with pc2:
+                    st.metric("Estimated lbs", f"{preview_lbs:,.0f}")
+
+        freight_cost = st.number_input(
+            "Freight Cost (total $, optional)",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
+            format="%.2f",
+            help="Total freight expense for the order. Added to summary cost as $/CWT and $/M sheets.",
+            key=f"fld_freight_cost_{rc}",
+        )
 
     c1, c2 = st.columns([1, 3])
     with c1:
-        search_btn = st.form_submit_button("🔍 Search", use_container_width=True)
+        search_btn = st.button("🔍 Search", use_container_width=True)
     with c2:
-        reset_btn = st.form_submit_button("🔄 Reset", use_container_width=True)
+        reset_btn = st.button("🔄 Reset", use_container_width=True)
 
 if reset_btn:
     for k in list(st.session_state.keys()):
@@ -659,9 +867,235 @@ if reset_btn:
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_sheets_idx = set()
     st.session_state.sel_alt_rolls_idx = set()
+    st.session_state.sel_alt_sheets_detail = set()
+    st.session_state.sel_alt_rolls_detail = set()
+    st.session_state.seen_alt_sheets_groups = set()
+    st.session_state.seen_alt_rolls_groups = set()
     st.session_state.search_params = {}
     st.session_state.reset_counter = st.session_state.get("reset_counter", 0) + 1
     st.rerun()
+
+
+# =========================================================
+# AGGREGATION HELPERS
+# =========================================================
+def _detect_inv_col(df):
+    for c in ["InvValue", "InvVal", "InventoryValue", "Value"]:
+        if c in df.columns:
+            return c
+    return None
+
+
+def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_df):
+    """Aggregate raw alt-sheet rows into group rows with derived metrics."""
+    if al_sh is None or al_sh.empty:
+        return pd.DataFrame()
+
+    al_sh = al_sh.copy()
+    inv_col = _detect_inv_col(al_sh)
+
+    width_col = next((c for c in ["SheetWidth", "Sheet_Width", "Width"] if c in al_sh.columns), None)
+    length_col = next((c for c in ["SheetLength", "Sheet_Length", "Length"] if c in al_sh.columns), None)
+
+    if "Caliper" in al_sh.columns:
+        al_sh["Caliper"] = pd.to_numeric(al_sh["Caliper"], errors="coerce")
+
+    if inv_col and inv_col in al_sh.columns:
+        al_sh[inv_col] = al_sh[inv_col].replace({',': ''}, regex=True)
+        al_sh[inv_col] = pd.to_numeric(al_sh[inv_col], errors="coerce")
+
+    # Yield = QtyOnHand * (1 - Waste_Pct/100) — recompute per-row to stay consistent
+    if "QtyOnHand" in al_sh.columns and "Waste_Pct" in al_sh.columns:
+        al_sh["Yield"] = al_sh["QtyOnHand"] * (1 - al_sh["Waste_Pct"] / 100.0)
+
+    group_cols = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
+    group_cols = [c for c in group_cols if c and c in al_sh.columns]
+
+    agg = {"QtyOnHand": "sum", "Yield": "sum", "Splits": "first", "Waste_Pct": "first"}
+    if "Units" in al_sh.columns:
+        agg["Units"] = "sum"
+    if inv_col and inv_col in al_sh.columns:
+        agg[inv_col] = "sum"
+    if "GradeID" in al_sh.columns:
+        agg["GradeID"] = "first"
+    if "BasisWtUOM" in al_sh.columns:
+        agg["BasisWtUOM"] = "first"
+
+    out = al_sh.groupby(group_cols, as_index=False).agg(agg)
+
+    if inv_col and inv_col in out.columns and "Yield" in out.columns:
+        out["NetAvgCost"] = (out[inv_col] / out["Yield"]) * 100.0
+        if "QtyOnHand" in out.columns:
+            out["AvgCost"] = (out[inv_col] / out["QtyOnHand"]) * 100.0
+    else:
+        out["AvgCost"] = np.nan
+        out["NetAvgCost"] = np.nan
+
+    if order_quantity is not None and order_size_adj_df is not None:
+        run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
+        out["RunWastePct"] = run_waste_pct
+        if "Yield" in out.columns:
+            out["Yield"] = out["Yield"] * (1 - run_waste_pct)
+        if "NetAvgCost" in out.columns:
+            out["NetAvgCost"] = out["NetAvgCost"] * (1 + run_waste_pct)
+
+    # Trimmer converting cost
+    per_cwt_rate = None
+    if machine_info_df is not None and "EquipType" in machine_info_df.columns:
+        trimmer_row = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == "Trimmer"]
+        if len(trimmer_row) > 0:
+            raw = trimmer_row.iloc[0].get("PerCWTRate", None)
+            if raw is not None:
+                if isinstance(raw, str):
+                    raw = raw.replace('$', '').replace(',', '').strip()
+                try:
+                    per_cwt_rate = float(raw)
+                except (ValueError, TypeError):
+                    per_cwt_rate = None
+    if per_cwt_rate is not None:
+        out["ConvertingCostPerCWT"] = per_cwt_rate
+        if "NetAvgCost" in out.columns:
+            out["FinalCostCWT"] = out["NetAvgCost"].fillna(0.0) + per_cwt_rate
+    else:
+        out["ConvertingCostPerCWT"] = np.nan
+        out["FinalCostCWT"] = np.nan
+
+    if inv_col and inv_col in out.columns:
+        out = out.drop(columns=[inv_col], errors="ignore")
+
+    return out
+
+
+def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_df,
+                         grade_df, paper_info_df, machine_info_df):
+    """Aggregate raw roll rows into group rows with derived metrics."""
+    if al_rl is None or al_rl.empty:
+        return pd.DataFrame()
+
+    al_rl = al_rl.copy()
+    inv_col = _detect_inv_col(al_rl)
+
+    if "Caliper" in al_rl.columns:
+        al_rl["Caliper"] = pd.to_numeric(al_rl["Caliper"], errors="coerce")
+
+    if inv_col and inv_col in al_rl.columns:
+        al_rl[inv_col] = al_rl[inv_col].replace({',': ''}, regex=True)
+        al_rl[inv_col] = pd.to_numeric(al_rl[inv_col], errors="coerce")
+
+    if "QtyOnHand" in al_rl.columns and "Waste_Pct" in al_rl.columns:
+        al_rl["Yield"] = al_rl["QtyOnHand"] * (1 - al_rl["Waste_Pct"] / 100.0)
+
+    group_cols = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
+    group_cols = [c for c in group_cols if c in al_rl.columns]
+
+    agg = {"QtyOnHand": "sum", "Yield": "sum", "Splits": "first", "Waste_Pct": "first"}
+    if "Units" in al_rl.columns:
+        agg["Units"] = "sum"
+    if inv_col and inv_col in al_rl.columns:
+        agg[inv_col] = "sum"
+    if "GradeID" in al_rl.columns:
+        agg["GradeID"] = "first"
+    if "BasisWtUOM" in al_rl.columns:
+        agg["BasisWtUOM"] = "first"
+    if "ProductCategoryID" in al_rl.columns:
+        agg["ProductCategoryID"] = "first"
+
+    out = al_rl.groupby(group_cols, as_index=False).agg(agg)
+
+    if inv_col and inv_col in out.columns and "Yield" in out.columns:
+        out["NetAvgCost"] = (out[inv_col] / out["Yield"]) * 100.0
+        if "QtyOnHand" in out.columns:
+            out["AvgCost"] = (out[inv_col] / out["QtyOnHand"]) * 100.0
+    else:
+        out["AvgCost"] = np.nan
+        out["NetAvgCost"] = np.nan
+
+    if order_quantity is not None and order_size_adj_df is not None:
+        run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
+        out["RunWastePct"] = run_waste_pct
+        if "Yield" in out.columns:
+            out["Yield"] = out["Yield"] * (1 - run_waste_pct)
+        if "NetAvgCost" in out.columns:
+            out["NetAvgCost"] = out["NetAvgCost"] * (1 + run_waste_pct)
+
+    if (
+        not out.empty
+        and grade_df is not None
+        and paper_info_df is not None
+        and machine_info_df is not None
+    ):
+        conv_series = out.apply(
+            lambda r: calculate_conversion_cost(
+                r, requested_width, grade_df, paper_info_df, machine_info_df,
+                order_quantity=order_quantity, order_size_adj_df=order_size_adj_df
+            ),
+            axis=1,
+        )
+        if isinstance(conv_series, pd.DataFrame):
+            conv_final = conv_series.reset_index(drop=True)
+        else:
+            conv_final = pd.DataFrame(list(conv_series)).reset_index(drop=True)
+        out = pd.concat([out.reset_index(drop=True), conv_final], axis=1)
+
+    if "NetAvgCost" in out.columns and "ConvertingCostPerCWT" in out.columns:
+        out["FinalCostCWT"] = (
+            out["NetAvgCost"].fillna(0.0) + out["ConvertingCostPerCWT"].fillna(0.0)
+        )
+
+    if inv_col and inv_col in out.columns:
+        out = out.drop(columns=[inv_col], errors="ignore")
+
+    return out
+
+
+def _group_key_series(df, keys):
+    """Return a Series of group-key tuples for matching raw rows to aggregate groups."""
+    if df is None or df.empty:
+        return pd.Series(dtype=object)
+    return df[keys].apply(tuple, axis=1)
+
+
+def sync_detail_selection(aggregated, raw, sel_agg_idx, group_keys,
+                          detail_state_key, seen_state_key):
+    """Reconcile per-roll detail selection with current aggregate-group selection.
+
+    When an aggregate group is newly selected, all its underlying raw rolls are
+    added to the detail-selection set. When it's de-selected, those rolls are
+    dropped. Re-checking a previously-unchecked group restores all of its rolls.
+    """
+    if aggregated is None or aggregated.empty or raw is None or raw.empty:
+        st.session_state[detail_state_key] = set()
+        st.session_state[seen_state_key] = set()
+        return
+
+    available_keys = [k for k in group_keys if k in raw.columns and k in aggregated.columns]
+    if not available_keys or "_detail_id" not in raw.columns:
+        return
+
+    current_groups = set()
+    for idx in sel_agg_idx:
+        if 0 <= idx < len(aggregated):
+            row = aggregated.iloc[idx]
+            current_groups.add(tuple(row.get(k) for k in available_keys))
+
+    seen_groups = st.session_state.get(seen_state_key, set())
+    newly_added = current_groups - seen_groups
+    removed = seen_groups - current_groups
+
+    detail_sel = set(st.session_state.get(detail_state_key, set()))
+
+    if newly_added or removed:
+        raw_keys = _group_key_series(raw, available_keys)
+        if newly_added:
+            for gk in newly_added:
+                ids = raw.loc[raw_keys == gk, "_detail_id"].astype(int).tolist()
+                detail_sel.update(ids)
+        if removed:
+            for gk in removed:
+                ids = set(raw.loc[raw_keys == gk, "_detail_id"].astype(int).tolist())
+                detail_sel.difference_update(ids)
+        st.session_state[detail_state_key] = detail_sel
+        st.session_state[seen_state_key] = current_groups
 
 
 # =========================================================
@@ -812,8 +1246,12 @@ def run_search(params):
         roll_data["Roll_Width"] = pd.to_numeric(roll_data["Roll_Width"], errors="coerce")
         roll_data = roll_data.dropna(subset=["Roll_Width"])
 
-        # Rolls must be >= requested width to cut sheets
-        suitable_rolls = roll_data[roll_data["Roll_Width"] >= requested_width].copy()
+        # Rolls must be >= requested width to cut sheets, and <= 65" (Sheeter max)
+        SHEETER_MAX_ROLL_WIDTH = 65.0
+        suitable_rolls = roll_data[
+            (roll_data["Roll_Width"] >= requested_width)
+            & (roll_data["Roll_Width"] <= SHEETER_MAX_ROLL_WIDTH)
+        ].copy()
         
         if len(suitable_rolls) > 0:
             # Calculate how many sheets can be cut across the width
@@ -865,215 +1303,21 @@ def run_search(params):
         if inv_col and inv_col in exact_matches.columns:
             exact_matches = exact_matches.drop(columns=[inv_col], errors="ignore")
 
-    # =========================================================
-    # PROCESS ALTERNATIVE SHEETS
-    # =========================================================
-    alternative_sheets = pd.DataFrame()
-    
+    # Stamp raw rows with stable IDs so downstream per-roll selection survives reruns
     if not alt_sheets.empty:
-        al_sh = alt_sheets.copy()
-        if "Caliper" in al_sh.columns:
-            al_sh["Caliper"] = pd.to_numeric(al_sh["Caliper"], errors="coerce")
-        
-        # Yield = QtyOnHand * (1 - Waste_Pct/100)
-        if "QtyOnHand" in al_sh.columns and "Waste_Pct" in al_sh.columns:
-            al_sh["Yield"] = al_sh["QtyOnHand"] * (1 - al_sh["Waste_Pct"] / 100.0)
-
-        # CRITICAL: Convert inventory value to numeric BEFORE groupby
-        if inv_col and inv_col in al_sh.columns:
-            al_sh[inv_col] = al_sh[inv_col].replace({',': ''}, regex=True)
-            al_sh[inv_col] = pd.to_numeric(al_sh[inv_col], errors="coerce")
-
-        # Group by columns for sheets
-        group_cols_sheets = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
-        group_cols_sheets = [c for c in group_cols_sheets if c in al_sh.columns]
-        
-        agg_sheets = {
-            "QtyOnHand": "sum",
-            "Yield": "sum",
-            "Splits": "first",
-            "Waste_Pct": "first",
-        }
-
-        if "Units" in al_sh.columns:
-            agg_sheets["Units"] = "sum"
-        if inv_col and inv_col in al_sh.columns:
-            agg_sheets[inv_col] = "sum"
-        if "GradeID" in al_sh.columns:
-            agg_sheets["GradeID"] = "first"
-        if "BasisWtUOM" in al_sh.columns:
-            agg_sheets["BasisWtUOM"] = "first"
-
-        alternative_sheets = al_sh.groupby(group_cols_sheets, as_index=False).agg(agg_sheets)
-
-        # Calculate costs
-        if inv_col and inv_col in alternative_sheets.columns and "Yield" in alternative_sheets.columns:
-            alternative_sheets["NetAvgCost"] = (
-                alternative_sheets[inv_col] / alternative_sheets["Yield"]
-            ) * 100.0
-            if "QtyOnHand" in alternative_sheets.columns:
-                alternative_sheets["AvgCost"] = (
-                    alternative_sheets[inv_col] / alternative_sheets["QtyOnHand"]
-                ) * 100.0
-        else:
-            alternative_sheets["AvgCost"] = np.nan
-            alternative_sheets["NetAvgCost"] = np.nan
-
-        # Apply RunWaste from order size adjustments (always Sheeter for sheet operations)
-        if order_quantity is not None and order_size_adj_df is not None:
-            run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
-            alternative_sheets["RunWastePct"] = run_waste_pct
-
-            if "Yield" in alternative_sheets.columns:
-                alternative_sheets["Yield"] = (
-                    alternative_sheets["Yield"] * (1 - run_waste_pct)
-                )
-            if "NetAvgCost" in alternative_sheets.columns:
-                alternative_sheets["NetAvgCost"] = (
-                    alternative_sheets["NetAvgCost"] * (1 + run_waste_pct)
-                )
-
-        # Add Trimmer converting cost for sheets
-        if machine_info_df is not None and "EquipType" in machine_info_df.columns:
-            trimmer_row = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == "Trimmer"]
-            if len(trimmer_row) > 0:
-                # Get PerCWTRate from the Trimmer row
-                per_cwt_rate = trimmer_row.iloc[0].get("PerCWTRate", None)
-                if per_cwt_rate is not None:
-                    # Clean and convert to float (handle $, commas, etc.)
-                    if isinstance(per_cwt_rate, str):
-                        per_cwt_rate = per_cwt_rate.replace('$', '').replace(',', '').strip()
-                    try:
-                        per_cwt_rate = float(per_cwt_rate)
-                        # Raw per-row rate — OrderQty surcharge and minimum
-                        # are applied at the summary level, not per row.
-                        alternative_sheets["ConvertingCostPerCWT"] = per_cwt_rate
-                        # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
-                        if "NetAvgCost" in alternative_sheets.columns:
-                            alternative_sheets["FinalCostCWT"] = (
-                                alternative_sheets["NetAvgCost"].fillna(0.0) + per_cwt_rate
-                            )
-                    except (ValueError, TypeError):
-                        alternative_sheets["ConvertingCostPerCWT"] = np.nan
-                        alternative_sheets["FinalCostCWT"] = np.nan
-                else:
-                    alternative_sheets["ConvertingCostPerCWT"] = np.nan
-                    alternative_sheets["FinalCostCWT"] = np.nan
-            else:
-                alternative_sheets["ConvertingCostPerCWT"] = np.nan
-                alternative_sheets["FinalCostCWT"] = np.nan
-        else:
-            alternative_sheets["ConvertingCostPerCWT"] = np.nan
-            alternative_sheets["FinalCostCWT"] = np.nan
-
-        # Drop inventory value column
-        if inv_col and inv_col in alternative_sheets.columns:
-            alternative_sheets = alternative_sheets.drop(columns=[inv_col], errors="ignore")
-
-    # =========================================================
-    # PROCESS ALTERNATIVE ROLLS
-    # =========================================================
-    alternative_rolls = pd.DataFrame()
-    
+        alt_sheets = alt_sheets.reset_index(drop=True)
+        alt_sheets["_detail_id"] = alt_sheets.index.astype(int)
     if not roll_results.empty:
-        al_rl = roll_results.copy()
-        if "Caliper" in al_rl.columns:
-            al_rl["Caliper"] = pd.to_numeric(al_rl["Caliper"], errors="coerce")
-        
-        # Yield = QtyOnHand * (1 - Waste_Pct/100)
-        if "QtyOnHand" in al_rl.columns and "Waste_Pct" in al_rl.columns:
-            al_rl["Yield"] = al_rl["QtyOnHand"] * (1 - al_rl["Waste_Pct"] / 100.0)
+        roll_results = roll_results.reset_index(drop=True)
+        roll_results["_detail_id"] = roll_results.index.astype(int)
 
-        # CRITICAL: Convert inventory value to numeric BEFORE groupby
-        if inv_col and inv_col in al_rl.columns:
-            al_rl[inv_col] = al_rl[inv_col].replace({',': ''}, regex=True)
-            al_rl[inv_col] = pd.to_numeric(al_rl[inv_col], errors="coerce")
-
-        # Group by columns for rolls
-        group_cols_rolls = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
-        group_cols_rolls = [c for c in group_cols_rolls if c in al_rl.columns]
-        
-        agg_rolls = {
-            "QtyOnHand": "sum",
-            "Yield": "sum",
-            "Splits": "first",
-            "Waste_Pct": "first",
-        }
-
-        if "Units" in al_rl.columns:
-            agg_rolls["Units"] = "sum"
-        if inv_col and inv_col in al_rl.columns:
-            agg_rolls[inv_col] = "sum"
-        if "GradeID" in al_rl.columns:
-            agg_rolls["GradeID"] = "first"
-        if "BasisWtUOM" in al_rl.columns:
-            agg_rolls["BasisWtUOM"] = "first"
-        if "ProductCategoryID" in al_rl.columns:
-            agg_rolls["ProductCategoryID"] = "first"
-
-        alternative_rolls = al_rl.groupby(group_cols_rolls, as_index=False).agg(agg_rolls)
-
-        # Calculate costs
-        if inv_col and inv_col in alternative_rolls.columns and "Yield" in alternative_rolls.columns:
-            alternative_rolls["NetAvgCost"] = (
-                alternative_rolls[inv_col] / alternative_rolls["Yield"]
-            ) * 100.0
-            if "QtyOnHand" in alternative_rolls.columns:
-                alternative_rolls["AvgCost"] = (
-                    alternative_rolls[inv_col] / alternative_rolls["QtyOnHand"]
-                ) * 100.0
-        else:
-            alternative_rolls["AvgCost"] = np.nan
-            alternative_rolls["NetAvgCost"] = np.nan
-
-        # Apply RunWaste from order size adjustments (always Sheeter for sheet operations)
-        if order_quantity is not None and order_size_adj_df is not None:
-            run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
-            alternative_rolls["RunWastePct"] = run_waste_pct
-
-            if "Yield" in alternative_rolls.columns:
-                alternative_rolls["Yield"] = (
-                    alternative_rolls["Yield"] * (1 - run_waste_pct)
-                )
-            if "NetAvgCost" in alternative_rolls.columns:
-                alternative_rolls["NetAvgCost"] = (
-                    alternative_rolls["NetAvgCost"] * (1 + run_waste_pct)
-                )
-
-        # Conversion metrics for rolls
-        if (
-            not alternative_rolls.empty
-            and grade_df is not None
-            and paper_info_df is not None
-            and machine_info_df is not None
-        ):
-            conv_series = alternative_rolls.apply(
-                lambda r: calculate_conversion_cost(
-                    r, requested_width, grade_df, paper_info_df, machine_info_df,
-                    order_quantity=order_quantity, order_size_adj_df=order_size_adj_df
-                ),
-                axis=1,
-            )
-
-            if isinstance(conv_series, pd.DataFrame):
-                conv_final = conv_series.reset_index(drop=True)
-            else:
-                conv_final = pd.DataFrame(list(conv_series)).reset_index(drop=True)
-
-            alternative_rolls = pd.concat(
-                [alternative_rolls.reset_index(drop=True), conv_final], axis=1
-            )
-
-        # FinalCostCWT = NetAvgCost + ConvertingCostPerCWT
-        if "NetAvgCost" in alternative_rolls.columns and "ConvertingCostPerCWT" in alternative_rolls.columns:
-            alternative_rolls["FinalCostCWT"] = (
-                alternative_rolls["NetAvgCost"].fillna(0.0)
-                + alternative_rolls["ConvertingCostPerCWT"].fillna(0.0)
-            )
-
-        # Drop inventory value column
-        if inv_col and inv_col in alternative_rolls.columns:
-            alternative_rolls = alternative_rolls.drop(columns=[inv_col], errors="ignore")
+    alternative_sheets = aggregate_alt_sheets(
+        alt_sheets, order_quantity, order_size_adj_df, machine_info_df
+    )
+    alternative_rolls = aggregate_alt_rolls(
+        roll_results, requested_width, order_quantity, order_size_adj_df,
+        grade_df, paper_info_df, machine_info_df,
+    )
 
     return exact_matches, alternative_sheets, alternative_rolls, requested_width, alt_sheets, roll_results
 
@@ -1082,6 +1326,66 @@ def run_search(params):
 # EXECUTE SEARCH (Unified)
 # =========================================================
 if search_btn:
+    order_quantity_lbs = order_quantity
+    order_quantity_sheets = None
+    sheets_mode_errors = []
+
+    if order_qty_unit == "Sheets":
+        if len(grade_names) != 1:
+            sheets_mode_errors.append("Sheets mode: select exactly one Grade Name.")
+        if len(basis_weights) != 1:
+            sheets_mode_errors.append("Sheets mode: select exactly one Basis Weight.")
+        if not sheet_width_input or not sheet_length_input:
+            sheets_mode_errors.append("Sheets mode: Sheet Width and Sheet Length are required.")
+        if order_quantity <= 0:
+            sheets_mode_errors.append("Sheets mode: enter a positive Order Quantity in sheets.")
+
+        area_in_for_conv = None
+        bw_for_conv = None
+        w_for_conv = None
+        l_for_conv = None
+        gsm_factor_for_conv = None
+        if not sheets_mode_errors:
+            try:
+                w_for_conv = float(str(sheet_width_input).strip())
+                l_for_conv = float(str(sheet_length_input).strip())
+            except ValueError:
+                sheets_mode_errors.append("Sheets mode: Sheet Width and Sheet Length must be numeric.")
+            try:
+                bw_for_conv = float(basis_weights[0])
+            except (TypeError, ValueError):
+                sheets_mode_errors.append("Sheets mode: Basis Weight must be numeric.")
+            if grade_df is not None and "Description" in grade_df.columns:
+                gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
+                if not gm.empty:
+                    area_val = gm.iloc[0].get("Area(IN)")
+                    if pd.notna(area_val) and float(area_val) > 0:
+                        area_in_for_conv = float(area_val)
+                    gsm_val = gm.iloc[0].get("GSM")
+                    if pd.notna(gsm_val) and float(gsm_val) > 0:
+                        gsm_factor_for_conv = float(gsm_val)
+            if area_in_for_conv is None:
+                sheets_mode_errors.append(
+                    f"Sheets mode: could not find Area(IN) for grade '{grade_names[0]}' in the Grade table."
+                )
+            if basis_wt_unit == "GSM":
+                if gsm_factor_for_conv:
+                    bw_for_conv = bw_for_conv / gsm_factor_for_conv
+                else:
+                    sheets_mode_errors.append(
+                        f"Sheets mode (GSM): no GSM factor found for grade '{grade_names[0]}' in the Grade table."
+                    )
+
+        if sheets_mode_errors:
+            for err in sheets_mode_errors:
+                st.error(err)
+            st.stop()
+
+        order_quantity_sheets = int(order_quantity)
+        order_quantity_lbs = (
+            order_quantity_sheets * w_for_conv * l_for_conv * bw_for_conv
+        ) / (500.0 * area_in_for_conv)
+
     # new search → persist params and clear selections
     st.session_state.search_params = {
         "warehouse_group": warehouse_group,
@@ -1092,11 +1396,17 @@ if search_btn:
         "sheet_width_input": sheet_width_input,
         "sheet_length_input": sheet_length_input,
         "max_waste_pct": max_waste_pct,
-        "order_quantity": order_quantity,
+        "order_quantity": order_quantity_lbs,
+        "order_qty_unit": order_qty_unit,
+        "order_quantity_sheets": order_quantity_sheets,
     }
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_sheets_idx = set()
     st.session_state.sel_alt_rolls_idx = set()
+    st.session_state.sel_alt_sheets_detail = set()
+    st.session_state.sel_alt_rolls_detail = set()
+    st.session_state.seen_alt_sheets_groups = set()
+    st.session_state.seen_alt_rolls_groups = set()
 
 exact_matches = pd.DataFrame()
 alternative_sheets = pd.DataFrame()
@@ -1331,22 +1641,31 @@ if not alternative_sheets.empty:
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
 
-    with st.expander("📋 Alternative Sheets Details — Underlying Inventory"):
+    # Determine sheet width/length column names dynamically (used for group keys)
+    sh_group_keys = ["GradeName", "BasisWt", "Caliper", "Mill", "Brand"]
+    for col in ["SheetWidth", "Sheet_Width", "Width"]:
+        if col in alt_sheets_raw.columns and col in alternative_sheets.columns:
+            sh_group_keys.append(col)
+            break
+    for col in ["SheetLength", "Sheet_Length", "Length"]:
+        if col in alt_sheets_raw.columns and col in alternative_sheets.columns:
+            sh_group_keys.append(col)
+            break
+
+    # Default-on logic: when an aggregate group is newly selected, auto-select all its rolls
+    sync_detail_selection(
+        alternative_sheets, alt_sheets_raw,
+        st.session_state.sel_alt_sheets_idx,
+        sh_group_keys,
+        "sel_alt_sheets_detail",
+        "seen_alt_sheets_groups",
+    )
+
+    with st.expander("📋 Alternative Sheets Details — Pick Individual Rolls", expanded=True):
         sel_sh_idx = sorted(list(st.session_state.sel_alt_sheets_idx))
         if sel_sh_idx and not alt_sheets_raw.empty:
+            available_keys = [k for k in sh_group_keys if k in alt_sheets_raw.columns and k in alternative_sheets.columns]
             selected_groups = alternative_sheets.iloc[sel_sh_idx]
-            # Determine sheet width/length column names dynamically
-            sh_group_keys = ["GradeName", "BasisWt", "Caliper", "Mill", "Brand"]
-            for col in ["SheetWidth", "Sheet_Width", "Width"]:
-                if col in alt_sheets_raw.columns and col in selected_groups.columns:
-                    sh_group_keys.append(col)
-                    break
-            for col in ["SheetLength", "Sheet_Length", "Length"]:
-                if col in alt_sheets_raw.columns and col in selected_groups.columns:
-                    sh_group_keys.append(col)
-                    break
-            available_keys = [k for k in sh_group_keys if k in alt_sheets_raw.columns and k in selected_groups.columns]
-
             detail_rows = alt_sheets_raw.merge(
                 selected_groups[available_keys].drop_duplicates(),
                 on=available_keys,
@@ -1361,25 +1680,64 @@ if not alternative_sheets.empty:
                         ) * 100.0
                         detail_rows["CostPerCWT"] = detail_rows["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
 
+                detail_rows["Selected"] = detail_rows["_detail_id"].astype(int).isin(
+                    st.session_state.sel_alt_sheets_detail
+                )
+
                 inv_display_cols = [
-                    "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "Selected", "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
                     "SheetWidth", "SheetLength", "Condition", "Mill", "Brand",
                     "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
                 ]
                 available_display = [c for c in inv_display_cols if c in detail_rows.columns]
-                detail_display = detail_rows[available_display].copy()
+                # Always include _detail_id so we can map edits back, even though it's hidden
+                editor_df = detail_rows[available_display + ["_detail_id"]].copy()
 
-                col_config = {}
-                if "QtyOnHand" in detail_display.columns:
+                col_config = {
+                    "_detail_id": None,
+                    "Selected": st.column_config.CheckboxColumn("✓", default=True),
+                }
+                if "QtyOnHand" in editor_df.columns:
                     col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%.0f")
-                if "BasisWt" in detail_display.columns:
+                if "BasisWt" in editor_df.columns:
                     col_config["BasisWt"] = st.column_config.NumberColumn("BasisWt", format="%d")
-                if "Caliper" in detail_display.columns:
+                if "Caliper" in editor_df.columns:
                     col_config["Caliper"] = st.column_config.NumberColumn("Caliper", format="%.4f")
-                if "CostPerCWT" in detail_display.columns:
+                if "CostPerCWT" in editor_df.columns:
                     col_config["CostPerCWT"] = st.column_config.NumberColumn("Cost/CWT", format="$%.2f")
 
-                st.dataframe(detail_display, use_container_width=True, hide_index=True, column_config=col_config)
+                # Key changes when the visible-row set changes, so stale edits
+                # from a different aggregate selection can't bleed onto new rows.
+                _vid_sh = tuple(sorted(editor_df["_detail_id"].astype(int).tolist()))
+                _editor_key_sh = f"alt_sheets_detail_editor_{hash(_vid_sh)}"
+
+                _btn_col_sh, _ = st.columns([1, 5])
+                with _btn_col_sh:
+                    if st.button("☐ Unselect All", key=f"unsel_all_sheets_{hash(_vid_sh)}"):
+                        st.session_state.sel_alt_sheets_detail -= set(_vid_sh)
+                        if _editor_key_sh in st.session_state:
+                            del st.session_state[_editor_key_sh]
+                        st.rerun()
+
+                # Refresh the Selected column from session state (Unselect All may have just modified it)
+                editor_df["Selected"] = editor_df["_detail_id"].astype(int).isin(
+                    st.session_state.sel_alt_sheets_detail
+                )
+
+                edited = st.data_editor(
+                    editor_df,
+                    column_config=col_config,
+                    disabled=[c for c in editor_df.columns if c != "Selected"],
+                    hide_index=True,
+                    use_container_width=True,
+                    key=_editor_key_sh,
+                )
+
+                visible_ids = set(_vid_sh)
+                selected_now = set(edited.loc[edited["Selected"] == True, "_detail_id"].astype(int).tolist())
+                st.session_state.sel_alt_sheets_detail = (
+                    (st.session_state.sel_alt_sheets_detail - visible_ids) | selected_now
+                )
             else:
                 st.info("No underlying inventory rows found for the selected alternatives.")
         else:
@@ -1400,6 +1758,7 @@ else:
 # DISPLAY: ALTERNATIVE ROLLS
 # =========================================================
 st.subheader("🎞️ Alternative Rolls")
+st.markdown("**Maximum roll width options presented = sheeter max width of 65 inch**")
 if not alternative_rolls.empty:
     # Ensure required computed columns exist
     for c in ["Yield", "AvgCost", "NetAvgCost", "LbsPerHour", "ConvHrs", "ConvertingCostPerCWT", "FinalCostCWT", "RunWastePct"]:
@@ -1514,13 +1873,21 @@ if not alternative_rolls.empty:
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
 
-    with st.expander("📋 Alternative Rolls Details — Underlying Inventory"):
+    rl_group_keys = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
+
+    sync_detail_selection(
+        alternative_rolls, alt_rolls_raw,
+        st.session_state.sel_alt_rolls_idx,
+        rl_group_keys,
+        "sel_alt_rolls_detail",
+        "seen_alt_rolls_groups",
+    )
+
+    with st.expander("📋 Alternative Rolls Details — Pick Individual Rolls", expanded=True):
         sel_rl_idx = sorted(list(st.session_state.sel_alt_rolls_idx))
         if sel_rl_idx and not alt_rolls_raw.empty:
+            available_keys = [k for k in rl_group_keys if k in alt_rolls_raw.columns and k in alternative_rolls.columns]
             selected_groups = alternative_rolls.iloc[sel_rl_idx]
-            group_keys = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
-            available_keys = [k for k in group_keys if k in alt_rolls_raw.columns and k in selected_groups.columns]
-
             detail_rows = alt_rolls_raw.merge(
                 selected_groups[available_keys].drop_duplicates(),
                 on=available_keys,
@@ -1535,29 +1902,65 @@ if not alternative_rolls.empty:
                         ) * 100.0
                         detail_rows["CostPerCWT"] = detail_rows["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
 
+                detail_rows["Selected"] = detail_rows["_detail_id"].astype(int).isin(
+                    st.session_state.sel_alt_rolls_detail
+                )
+
                 inv_display_cols = [
-                    "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                    "Selected", "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
                     "Roll_Width", "Diameter", "Condition", "Mill", "Brand",
                     "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
                 ]
                 available_display = [c for c in inv_display_cols if c in detail_rows.columns]
-                detail_display = detail_rows[available_display].copy()
+                editor_df = detail_rows[available_display + ["_detail_id"]].copy()
 
-                col_config = {}
-                if "QtyOnHand" in detail_display.columns:
+                col_config = {
+                    "_detail_id": None,
+                    "Selected": st.column_config.CheckboxColumn("✓", default=True),
+                }
+                if "QtyOnHand" in editor_df.columns:
                     col_config["QtyOnHand"] = st.column_config.NumberColumn("QtyOnHand", format="%.0f")
-                if "BasisWt" in detail_display.columns:
+                if "BasisWt" in editor_df.columns:
                     col_config["BasisWt"] = st.column_config.NumberColumn("BasisWt", format="%d")
-                if "Caliper" in detail_display.columns:
+                if "Caliper" in editor_df.columns:
                     col_config["Caliper"] = st.column_config.NumberColumn("Caliper", format="%.4f")
-                if "Roll_Width" in detail_display.columns:
+                if "Roll_Width" in editor_df.columns:
                     col_config["Roll_Width"] = st.column_config.NumberColumn("Roll_Width", format="%.2f")
-                if "Diameter" in detail_display.columns:
+                if "Diameter" in editor_df.columns:
                     col_config["Diameter"] = st.column_config.NumberColumn("Diameter", format="%.0f")
-                if "CostPerCWT" in detail_display.columns:
+                if "CostPerCWT" in editor_df.columns:
                     col_config["CostPerCWT"] = st.column_config.NumberColumn("Cost/CWT", format="$%.2f")
 
-                st.dataframe(detail_display, use_container_width=True, hide_index=True, column_config=col_config)
+                _vid_rl = tuple(sorted(editor_df["_detail_id"].astype(int).tolist()))
+                _editor_key_rl = f"alt_rolls_detail_editor_{hash(_vid_rl)}"
+
+                _btn_col_rl, _ = st.columns([1, 5])
+                with _btn_col_rl:
+                    if st.button("☐ Unselect All", key=f"unsel_all_rolls_{hash(_vid_rl)}"):
+                        st.session_state.sel_alt_rolls_detail -= set(_vid_rl)
+                        if _editor_key_rl in st.session_state:
+                            del st.session_state[_editor_key_rl]
+                        st.rerun()
+
+                # Refresh the Selected column from session state (Unselect All may have just modified it)
+                editor_df["Selected"] = editor_df["_detail_id"].astype(int).isin(
+                    st.session_state.sel_alt_rolls_detail
+                )
+
+                edited = st.data_editor(
+                    editor_df,
+                    column_config=col_config,
+                    disabled=[c for c in editor_df.columns if c != "Selected"],
+                    hide_index=True,
+                    use_container_width=True,
+                    key=_editor_key_rl,
+                )
+
+                visible_ids = set(_vid_rl)
+                selected_now = set(edited.loc[edited["Selected"] == True, "_detail_id"].astype(int).tolist())
+                st.session_state.sel_alt_rolls_detail = (
+                    (st.session_state.sel_alt_rolls_detail - visible_ids) | selected_now
+                )
             else:
                 st.info("No underlying inventory rows found for the selected alternatives.")
         else:
@@ -1588,16 +1991,43 @@ selected_exact = (
     if (not exact_matches.empty and exact_sel_idx_sorted)
     else pd.DataFrame()
 )
-selected_alt_sheets = (
-    alternative_sheets.iloc[alt_sheets_sel_idx_sorted]
-    if (not alternative_sheets.empty and alt_sheets_sel_idx_sorted)
-    else pd.DataFrame()
-)
-selected_alt_rolls = (
-    alternative_rolls.iloc[alt_rolls_sel_idx_sorted]
-    if (not alternative_rolls.empty and alt_rolls_sel_idx_sorted)
-    else pd.DataFrame()
-)
+
+# Re-aggregate alt sheets / rolls from the user's per-individual-roll detail selection,
+# so the summary reflects exactly the rolls checked in the detail expanders.
+_sp = st.session_state.search_params
+_order_qty = _sp.get("order_quantity")
+_req_width = None
+try:
+    _req_width = float(str(_sp.get("sheet_width_input")).strip()) if _sp.get("sheet_width_input") else None
+except (TypeError, ValueError):
+    _req_width = None
+
+if (
+    not alt_sheets_raw.empty
+    and st.session_state.sel_alt_sheets_detail
+):
+    _picked_sh = alt_sheets_raw[
+        alt_sheets_raw["_detail_id"].astype(int).isin(st.session_state.sel_alt_sheets_detail)
+    ]
+    selected_alt_sheets = aggregate_alt_sheets(
+        _picked_sh, _order_qty, order_size_adj_df, machine_info_df
+    )
+else:
+    selected_alt_sheets = pd.DataFrame()
+
+if (
+    not alt_rolls_raw.empty
+    and st.session_state.sel_alt_rolls_detail
+):
+    _picked_rl = alt_rolls_raw[
+        alt_rolls_raw["_detail_id"].astype(int).isin(st.session_state.sel_alt_rolls_detail)
+    ]
+    selected_alt_rolls = aggregate_alt_rolls(
+        _picked_rl, _req_width, _order_qty, order_size_adj_df,
+        grade_df, paper_info_df, machine_info_df,
+    )
+else:
+    selected_alt_rolls = pd.DataFrame()
 
 # Totals
 if not selected_exact.empty and "QtyOnHand" in selected_exact.columns:
@@ -1753,7 +2183,7 @@ if alt_yield_for_conv > 0:
     blended_conv_cwt = (alt_conv_dollar / alt_yield_for_conv) * 100.0
 
 if (
-    (alt_sheets_sel_idx_sorted or alt_rolls_sel_idx_sorted)
+    (not selected_alt_sheets.empty or not selected_alt_rolls.empty)
     and order_quantity_param
     and order_quantity_param > 0
 ):
@@ -1858,6 +2288,18 @@ if (
     if mweight and mweight > 0:
         order_qty_cost_per_m = order_qty_cost_cwt * 0.01 * mweight
 
+# --- Freight: convert total $ to $/CWT and fold into Order Qty Cost ---
+freight_cwt = 0.0
+freight_per_m = 0.0
+if freight_cost and freight_cost > 0 and order_quantity_param and order_quantity_param > 0:
+    freight_cwt = (freight_cost / order_quantity_param) * 100.0
+    if mweight and mweight > 0:
+        freight_per_m = freight_cwt * 0.01 * mweight
+    if order_qty_cost_cwt is not None:
+        order_qty_cost_cwt += freight_cwt
+    if order_qty_cost_per_m is not None:
+        order_qty_cost_per_m += freight_per_m
+
 # Shrink metric label/value fonts so 10 columns fit without wrapping
 st.markdown(
     """
@@ -1885,28 +2327,56 @@ with c6:
 with c7:
     st.metric("Est. Sheets", f"{est_sheets:,.0f}" if est_sheets is not None else "—")
 with c8:
-    st.metric("Order Qty", f"{order_quantity_param:,.0f} lbs" if order_quantity_param else "—")
+    if order_quantity_param:
+        sheets_param = st.session_state.search_params.get("order_quantity_sheets")
+        if st.session_state.search_params.get("order_qty_unit") == "Sheets" and sheets_param:
+            oq_value = f"{sheets_param:,} sht"
+            oq_help = f"≈ {order_quantity_param:,.0f} lbs (converted from {sheets_param:,} sheets)"
+        else:
+            oq_value = f"{order_quantity_param:,.0f} lbs"
+            oq_help = None
+        st.metric("Order Qty", oq_value, help=oq_help)
+    else:
+        st.metric("Order Qty", "—")
 with c9:
+    cwt_help = f"Includes ${freight_cwt:,.2f}/CWT freight (${freight_cost:,.2f} total)" if freight_cwt > 0 else None
     st.metric(
         "Order Qty Cost",
         f"${order_qty_cost_cwt:,.2f} / CWT" if order_qty_cost_cwt is not None else "— / CWT",
+        help=cwt_help,
     )
 with c10:
+    per_m_help = f"Includes ${freight_per_m:,.2f}/M sheets freight (${freight_cost:,.2f} total)" if freight_per_m > 0 else None
     st.metric(
         "Order Qty Cost",
         f"${order_qty_cost_per_m:,.2f} / M Sheets" if order_qty_cost_per_m is not None else "— / M Sheets",
+        help=per_m_help,
     )
 
 if mweight_error:
     st.error(mweight_error)
 
-if not exact_sel_idx_sorted and not alt_sheets_sel_idx_sorted and not alt_rolls_sel_idx_sorted:
+if selected_exact.empty and selected_alt_sheets.empty and selected_alt_rolls.empty:
     st.info("No rows selected yet above.")
 
 # CSV Export of selected rows
 export_df = pd.concat([selected_exact, selected_alt_sheets, selected_alt_rolls], ignore_index=True) if (
     not selected_exact.empty or not selected_alt_sheets.empty or not selected_alt_rolls.empty
 ) else pd.DataFrame()
+
+# Build per-roll detail (the individual rolls the user kept checked in the detail expanders)
+def _build_detail_rows(raw, detail_ids):
+    if raw is None or raw.empty or not detail_ids:
+        return pd.DataFrame()
+    out = raw[raw["_detail_id"].astype(int).isin(detail_ids)].copy()
+    if "InvValue" in out.columns and "QtyOnHand" in out.columns:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["CostPerCWT"] = (out["InvValue"] / out["QtyOnHand"]) * 100.0
+            out["CostPerCWT"] = out["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
+    return out
+
+detail_sheets_df = _build_detail_rows(alt_sheets_raw, st.session_state.sel_alt_sheets_detail)
+detail_rolls_df = _build_detail_rows(alt_rolls_raw, st.session_state.sel_alt_rolls_detail)
 
 if not export_df.empty:
     # Build basis weight token for filename (use first selected or empty if none/multiple)
@@ -1936,38 +2406,86 @@ if not export_df.empty:
         fname = f"NKQuote_{dim_token}.csv"
         pdf_fname = f"NKQuote_{dim_token}.pdf"
 
+    # Gather summary data (shared between CSV and PDF exports)
+    summary_data = {
+        "exact_lbs": total_exact_lbs,
+        "alt_yield": total_alt_yield,
+        "total_lbs": total_lbs,
+        "mweight": mweight,
+        "blended_cwt": blended_cost_cwt,
+        "cost_per_m": cost_per_m,
+        "est_sheets": est_sheets,
+        "order_qty": order_quantity_param,
+        "order_qty_cost_cwt": order_qty_cost_cwt,
+        "order_qty_cost_per_m": order_qty_cost_per_m,
+        "freight_total": freight_cost if freight_cost and freight_cost > 0 else None,
+        "freight_cwt": freight_cwt if freight_cwt > 0 else None,
+        "freight_per_m": freight_per_m if freight_per_m > 0 else None,
+    }
+
+    # Build CSV: per-row data + summary footer
+    csv_body = export_df.to_csv(index=False)
+    footer_rows = [
+        "",
+        "Summary,",
+        f"Exact Qty Selected,{total_exact_lbs:,.0f} lbs",
+        f"Alt Yield Selected,{total_alt_yield:,.0f} lbs",
+        f"Total Estimated Yield,{total_lbs:,.0f} lbs",
+        f"Mweight,{mweight:,.0f} lbs" if mweight else "Mweight,—",
+        f"Blended Cost / CWT,${blended_cost_cwt:,.2f}",
+        f"Cost Per M Sheets,${cost_per_m:,.2f}" if cost_per_m is not None else "Cost Per M Sheets,—",
+        f"Estimated Sheets,{est_sheets:,.0f}" if est_sheets is not None else "Estimated Sheets,—",
+        f"Order Qty,{order_quantity_param:,.0f} lbs" if order_quantity_param else "Order Qty,—",
+    ]
+    if freight_cwt > 0:
+        footer_rows.extend([
+            f"Freight Total,${freight_cost:,.2f}",
+            f"Freight / CWT,${freight_cwt:,.2f}",
+            f"Freight / M Sheets,${freight_per_m:,.2f}",
+        ])
+    footer_rows.extend([
+        f"Order Qty Cost / CWT,${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "Order Qty Cost / CWT,—",
+        f"Order Qty Cost / M Sheets,${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "Order Qty Cost / M Sheets,—",
+    ])
+    # Append selected per-roll detail to the CSV (after the aggregated rows, before the summary)
+    detail_section = ""
+    detail_cols_sheets = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                          "SheetWidth", "SheetLength", "Mill", "Warehouse", "QtyOnHand", "CostPerCWT"]
+    detail_cols_rolls = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
+                         "Roll_Width", "Diameter", "Mill", "Warehouse", "QtyOnHand", "CostPerCWT"]
+    if not detail_sheets_df.empty:
+        cols_present = [c for c in detail_cols_sheets if c in detail_sheets_df.columns]
+        detail_section += "\nSelected Alt-Sheet Rolls (detail)\n"
+        detail_section += detail_sheets_df[cols_present].to_csv(index=False)
+    if not detail_rolls_df.empty:
+        cols_present = [c for c in detail_cols_rolls if c in detail_rolls_df.columns]
+        detail_section += "\nSelected Alt Rolls (detail)\n"
+        detail_section += detail_rolls_df[cols_present].to_csv(index=False)
+
+    csv_with_summary = csv_body + detail_section + "\n".join(footer_rows) + "\n"
+
     # Export buttons side by side
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
-    
+
     with btn_col1:
         st.download_button(
             "💾 Export to CSV",
-            export_df.to_csv(index=False).encode("utf-8"),
+            csv_with_summary.encode("utf-8"),
             file_name=fname,
             mime="text/csv",
         )
-    
+
     with btn_col2:
-        # Gather summary data for PDF
-        summary_data = {
-            "exact_lbs": total_exact_lbs,
-            "alt_yield": total_alt_yield,
-            "total_lbs": total_lbs,
-            "mweight": mweight,
-            "blended_cwt": blended_cost_cwt,
-            "cost_per_m": cost_per_m,
-            "est_sheets": est_sheets,
-        }
-        
-        # Generate PDF
         pdf_bytes = generate_quote_pdf(
             st.session_state.search_params,
             selected_exact,
             selected_alt_sheets,
             selected_alt_rolls,
-            summary_data
+            summary_data,
+            detail_sheets=detail_sheets_df,
+            detail_rolls=detail_rolls_df,
         )
-        
+
         st.download_button(
             "📄 Export to PDF",
             pdf_bytes,
