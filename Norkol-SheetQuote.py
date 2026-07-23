@@ -82,6 +82,16 @@ ORDER_SIZE_ADJ_BLOB = "Order Size Adjustments.csv"
 PO_DETAIL_BLOB = "SODetail"
 RESERVE_INV_BLOB = "Inventory/ReserveInventory.csv"
 
+# Reserved rolls/sheets must be aged past this many days before they can be pulled
+# into a quote scenario (also drives the read-only Reserved Inventory panel).
+RESERVED_MIN_AGE_DAYS = 30
+
+# Non-paper stock (plastic bags, tape, stretch wrap, barrier film, pouches) rides along
+# in the same extract, but its QtyOnHand is a case/piece count rather than pounds — so
+# InvValue / QtyOnHand * 100 produces a meaningless $/CWT. It is not quotable roll or
+# sheet stock, so it is dropped at load rather than filtered per search.
+EXCLUDED_PRODUCT_CATEGORIES = {"INDUSTRIAL PKG SUPPLIES", "INDUSTRIAL PACKAGING"}
+
 # =========================================================
 # DATA LOADING
 # =========================================================
@@ -152,6 +162,18 @@ def load_order_size_adjustments():
         return None
 
 
+def drop_non_roll_stock(frame):
+    """Drop non-paper categories whose QtyOnHand is a unit count, not pounds.
+
+    Applied once at load so the search pool, the product-group dropdown and the
+    reserved-inventory panel all agree on what counts as quotable stock.
+    """
+    if frame is None or frame.empty or "ProductCategoryID" not in frame.columns:
+        return frame
+    cat = frame["ProductCategoryID"].astype(str).str.strip().str.upper()
+    return frame[~cat.isin(EXCLUDED_PRODUCT_CATEGORIES)].copy()
+
+
 @st.cache_data(ttl=3600)
 def load_reserve_inventory():
     try:
@@ -160,8 +182,12 @@ def load_reserve_inventory():
         csv_content = blob_client.download_blob().readall().decode("utf-8")
         ri_df = pd.read_csv(StringIO(csv_content), on_bad_lines="skip", encoding="utf-8")
         ri_df.columns = ri_df.columns.str.strip()
+        # Strip thousands separators before numeric coercion (inv values may be "2,072.29")
+        for col in ["InvValue", "InvVal", "InventoryValue", "Value"]:
+            if col in ri_df.columns:
+                ri_df[col] = ri_df[col].replace({',': ''}, regex=True)
         for col in ["BasisWt", "Caliper", "Roll_Width", "QtyOnHand", "Diameter", "Units",
-                     "SheetWidth", "SheetLength"]:
+                     "SheetWidth", "SheetLength", "InvValue", "InvVal", "InventoryValue", "Value"]:
             if col in ri_df.columns:
                 ri_df[col] = pd.to_numeric(ri_df[col], errors="coerce")
         if "ReserveDate" in ri_df.columns:
@@ -670,6 +696,10 @@ reserve_inv_df = load_reserve_inventory()
 if df is None:
     st.stop()
 
+# Keep non-paper items out of both candidate pools before anything reads them.
+df = drop_non_roll_stock(df)
+reserve_inv_df = drop_non_roll_stock(reserve_inv_df)
+
 # =========================================================
 # SIDEBAR
 # =========================================================
@@ -854,6 +884,16 @@ with st.container():
             key=f"fld_freight_cost_{rc}",
         )
 
+        include_reserved = st.checkbox(
+            f"🔒 Include reserved inventory (reserved > {RESERVED_MIN_AGE_DAYS} days)",
+            help=(
+                "Scenario mode: allows stock already reserved against a sales order to be "
+                "quoted. Reserved rolls/sheets are flagged with 🔒 and their customer in the "
+                "results. Releasing them still has to be cleared with the owning sales rep."
+            ),
+            key=f"fld_include_reserved_{rc}",
+        )
+
     c1, c2 = st.columns([1, 3])
     with c1:
         search_btn = st.button("🔍 Search", use_container_width=True)
@@ -879,6 +919,58 @@ if reset_btn:
 # =========================================================
 # AGGREGATION HELPERS
 # =========================================================
+# Columns identifying the reservation a roll/sheet is held against.
+RESERVE_ID_COLS = ["ResSONum", "ReserveSalesRep", "ResCust"]
+
+# The reserve extract uses several spellings of "no value" — notably a literal
+# "(None)" in ResSONum. Most reserved stock is customer-level holds with no SO#.
+_PLACEHOLDERS = {"", "nan", "none", "(none)", "null", "n/a", "-"}
+
+
+def _with_reserved(group_cols, frame):
+    """Append IsReserved to a section's group keys so reserved and free stock in the
+    same grade/size never merge into one row. No-op when reserved stock isn't present."""
+    if "IsReserved" in frame.columns and "IsReserved" not in group_cols:
+        return group_cols + ["IsReserved"]
+    return group_cols
+
+
+def _clean_val(v):
+    s = str(v).strip()
+    return "" if s.lower() in _PLACEHOLDERS else s
+
+
+def _join_uniq(s):
+    """Collapse a group's reservation values into one display string."""
+    vals = sorted({c for c in (_clean_val(v) for v in s.dropna()) if c})
+    if not vals:
+        return ""
+    return ", ".join(vals[:3]) + ("…" if len(vals) > 3 else "")
+
+
+def _reserve_agg(frame, agg_dict):
+    """Add reservation columns to an aggregation spec, collapsed to display strings."""
+    for c in RESERVE_ID_COLS:
+        if c in frame.columns:
+            agg_dict[c] = _join_uniq
+    return agg_dict
+
+
+def _reserved_label(row):
+    """Short '🔒 customer (SO#)' marker for a grouped row, or '—' if free stock."""
+    if not bool(row.get("IsReserved", False)):
+        return "—"
+    cust = _clean_val(row.get("ResCust", ""))
+    so = _clean_val(row.get("ResSONum", ""))
+    if cust and so:
+        return f"🔒 {cust} (SO# {so})"
+    if cust:
+        return f"🔒 {cust}"
+    if so:
+        return f"🔒 SO# {so}"
+    return "🔒 reserved"
+
+
 def _detect_inv_col(df):
     for c in ["InvValue", "InvVal", "InventoryValue", "Value"]:
         if c in df.columns:
@@ -910,6 +1002,7 @@ def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_
 
     group_cols = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
     group_cols = [c for c in group_cols if c and c in al_sh.columns]
+    group_cols = _with_reserved(group_cols, al_sh)
 
     agg = {"QtyOnHand": "sum", "Yield": "sum", "Splits": "first", "Waste_Pct": "first"}
     if "Units" in al_sh.columns:
@@ -920,8 +1013,9 @@ def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_
         agg["GradeID"] = "first"
     if "BasisWtUOM" in al_sh.columns:
         agg["BasisWtUOM"] = "first"
+    _reserve_agg(al_sh, agg)
 
-    out = al_sh.groupby(group_cols, as_index=False).agg(agg)
+    out = al_sh.groupby(group_cols, as_index=False, dropna=False).agg(agg)
 
     if inv_col and inv_col in out.columns and "Yield" in out.columns:
         out["NetAvgCost"] = (out[inv_col] / out["Yield"]) * 100.0
@@ -987,6 +1081,7 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
 
     group_cols = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
     group_cols = [c for c in group_cols if c in al_rl.columns]
+    group_cols = _with_reserved(group_cols, al_rl)
 
     agg = {"QtyOnHand": "sum", "Yield": "sum", "Splits": "first", "Waste_Pct": "first"}
     if "Units" in al_rl.columns:
@@ -999,8 +1094,9 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
         agg["BasisWtUOM"] = "first"
     if "ProductCategoryID" in al_rl.columns:
         agg["ProductCategoryID"] = "first"
+    _reserve_agg(al_rl, agg)
 
-    out = al_rl.groupby(group_cols, as_index=False).agg(agg)
+    out = al_rl.groupby(group_cols, as_index=False, dropna=False).agg(agg)
 
     if inv_col and inv_col in out.columns and "Yield" in out.columns:
         out["NetAvgCost"] = (out[inv_col] / out["Yield"]) * 100.0
@@ -1111,12 +1207,36 @@ def run_search(params):
     sheet_length_input = params.get("sheet_length_input")
     max_waste_pct = params.get("max_waste_pct")
     order_quantity = params.get("order_quantity")
+    include_reserved = params.get("include_reserved", False)
 
     if not order_quantity:
         st.error("Order quantity in lbs must be provided")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None, pd.DataFrame(), pd.DataFrame()
 
     filtered = df.copy()
+
+    # Scenario mode: fold aged reserved stock into the candidate pool. The reserve blob
+    # carries the same schema as main inventory (plus the Res* columns) and the two are
+    # disjoint, so a plain concat cannot double-count a roll/sheet. When the option is off
+    # we add no columns at all, leaving the normal search path untouched.
+    if include_reserved and reserve_inv_df is not None and not reserve_inv_df.empty:
+        ri_pool = reserve_inv_df.copy()
+        if "ReserveDate" in ri_pool.columns:
+            cutoff = pd.Timestamp.now() - pd.Timedelta(days=RESERVED_MIN_AGE_DAYS)
+            ri_pool = ri_pool[ri_pool["ReserveDate"] <= cutoff]
+        if not ri_pool.empty:
+            filtered["IsReserved"] = False
+            ri_pool["IsReserved"] = True
+            filtered = pd.concat([filtered, ri_pool], ignore_index=True)
+            filtered["IsReserved"] = filtered["IsReserved"].fillna(False).astype(bool)
+
+            # Reservation columns must be blank rather than NaN on the free-stock rows:
+            # they are carried through aggregation, and NaN keys interact badly with groupby.
+            for _c in RESERVE_ID_COLS:
+                if _c not in filtered.columns:
+                    filtered[_c] = ""
+                else:
+                    filtered[_c] = filtered[_c].fillna("")
 
     # Filters
     if "WarehouseGroup" in filtered.columns and warehouse_group != "All":
@@ -1282,7 +1402,8 @@ def run_search(params):
 
         group_cols_exact = ["GradeName", "BasisWt", "Caliper", width_col, length_col, "Mill", "Brand"]
         group_cols_exact = [c for c in group_cols_exact if c in ex.columns]
-        
+        group_cols_exact = _with_reserved(group_cols_exact, ex)
+
         agg_dict_ex = {"QtyOnHand": "sum"}
         if inv_col and inv_col in ex.columns:
             agg_dict_ex[inv_col] = "sum"
@@ -1290,8 +1411,9 @@ def run_search(params):
             agg_dict_ex["GradeID"] = "first"
         if "BasisWtUOM" in ex.columns:
             agg_dict_ex["BasisWtUOM"] = "first"
+        _reserve_agg(ex, agg_dict_ex)
 
-        exact_matches = ex.groupby(group_cols_exact, as_index=False).agg(agg_dict_ex)
+        exact_matches = ex.groupby(group_cols_exact, as_index=False, dropna=False).agg(agg_dict_ex)
 
         # AvgCost = (sum inv) / (sum qty) * 100
         if inv_col and inv_col in exact_matches.columns and "QtyOnHand" in exact_matches.columns:
@@ -1399,6 +1521,7 @@ if search_btn:
         "order_quantity": order_quantity_lbs,
         "order_qty_unit": order_qty_unit,
         "order_quantity_sheets": order_quantity_sheets,
+        "include_reserved": include_reserved,
     }
     st.session_state.sel_exact_idx = set()
     st.session_state.sel_alt_sheets_idx = set()
@@ -1426,33 +1549,27 @@ else:
 # DISPLAY: EXACT MATCHES
 # =========================================================
 st.subheader("🎯 Exact Matches")
+
+# Only surface the reservation column when reserved stock is actually in play.
+show_reserved_col = bool(st.session_state.search_params.get("include_reserved"))
+
 if not exact_matches.empty:
     # 10 columns: checkbox, grade, basis, caliper, sheet width, sheet length, mill, brand, qty, cost
-    header_cols = st.columns([0.5, 1.6, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 1.1, 1.1])
-    with header_cols[0]:
-        st.markdown("**☑**")
-    with header_cols[1]:
-        st.markdown("**Grade**")
-    with header_cols[2]:
-        st.markdown("**BasisWt**")
-    with header_cols[3]:
-        st.markdown("**Caliper**")
-    with header_cols[4]:
-        st.markdown("**SheetWidth**")
-    with header_cols[5]:
-        st.markdown("**SheetLength**")
-    with header_cols[6]:
-        st.markdown("**Mill**")
-    with header_cols[7]:
-        st.markdown("**Brand**")
-    with header_cols[8]:
-        st.markdown("**QtyOnHand**")
-    with header_cols[9]:
-        st.markdown("**AvgCost**")
+    exact_ratios = [0.5, 1.6, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 1.1, 1.1]
+    exact_headers = ["☑", "Grade", "BasisWt", "Caliper", "SheetWidth", "SheetLength",
+                     "Mill", "Brand", "QtyOnHand", "AvgCost"]
+    if show_reserved_col:
+        exact_ratios.append(1.8)
+        exact_headers.append("Reserved For")
+
+    header_cols = st.columns(exact_ratios)
+    for _i, _title in enumerate(exact_headers):
+        with header_cols[_i]:
+            st.markdown(f"**{_title}**")
     st.markdown("---")
 
     for idx, row in exact_matches.iterrows():
-        cols = st.columns([0.5, 1.6, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 1.1, 1.1])
+        cols = st.columns(exact_ratios)
         key = f"exact_{idx}"
 
         with cols[0]:
@@ -1507,6 +1624,9 @@ if not exact_matches.empty:
             v = row.get("AvgCost", None)
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else "")
+        if show_reserved_col:
+            with cols[10]:
+                st.write(_reserved_label(row))
 
     with st.expander("📋 Exact Details"):
         # Format Caliper to 4 decimal places for display
@@ -1554,12 +1674,15 @@ if not alternative_sheets.empty:
         1.1,  # 14 FinalCost/CWT
     ]
 
-    H_sh = st.columns(sheet_ratios)
     sheet_headers = [
         "☑", "Grade", "BasisWt", "Caliper", "SheetWidth", "SheetLength",
         "Mill", "Brand", "Qty", "Waste%", "RunW%", "Yield", "NetAvgCost", "Conv$/CWT", "FinalCost/CWT"
     ]
+    if show_reserved_col:
+        sheet_ratios = sheet_ratios + [1.8]   # 15 Reserved For
+        sheet_headers.append("Reserved For")
 
+    H_sh = st.columns(sheet_ratios)
     for i, title in enumerate(sheet_headers):
         with H_sh[i]:
             st.markdown(f"**{title}**")
@@ -1640,6 +1763,9 @@ if not alternative_sheets.empty:
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
+        if show_reserved_col:
+            with C[15]:  # Reserved For
+                st.write(_reserved_label(row))
 
     # Determine sheet width/length column names dynamically (used for group keys)
     sh_group_keys = ["GradeName", "BasisWt", "Caliper", "Mill", "Brand"]
@@ -1651,6 +1777,8 @@ if not alternative_sheets.empty:
         if col in alt_sheets_raw.columns and col in alternative_sheets.columns:
             sh_group_keys.append(col)
             break
+    if "IsReserved" in alt_sheets_raw.columns and "IsReserved" in alternative_sheets.columns:
+        sh_group_keys.append("IsReserved")
 
     # Default-on logic: when an aggregate group is newly selected, auto-select all its rolls
     sync_detail_selection(
@@ -1689,6 +1817,15 @@ if not alternative_sheets.empty:
                     "SheetWidth", "SheetLength", "Condition", "Mill", "Brand",
                     "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
                 ]
+
+                # Per-row reservation detail, only when reserved stock is in the pool
+                if show_reserved_col and "IsReserved" in detail_rows.columns:
+                    detail_rows["Res"] = detail_rows["IsReserved"].map(
+                        lambda x: "🔒" if bool(x) else ""
+                    )
+                    inv_display_cols.insert(1, "Res")
+                    inv_display_cols += ["ResSONum", "ReserveSalesRep", "ResCust"]
+
                 available_display = [c for c in inv_display_cols if c in detail_rows.columns]
                 # Always include _detail_id so we can map edits back, even though it's hidden
                 editor_df = detail_rows[available_display + ["_detail_id"]].copy()
@@ -1786,13 +1923,16 @@ if not alternative_rolls.empty:
         1.1   # 16 FinalCost/CWT
     ]
 
-    H_rl = st.columns(roll_ratios)
     roll_headers = [
         "☑", "Grade", "BasisWt", "Caliper", "RollWidth",
         "Mill", "Brand", "Qty", "Splits", "Waste%", "RunW%", "Yield", "NetAvgCost",
         "Lbs/Hr", "ConvHrs", "Conv$/CWT", "FinalCost/CWT"
     ]
+    if show_reserved_col:
+        roll_ratios = roll_ratios + [1.8]   # 17 Reserved For
+        roll_headers.append("Reserved For")
 
+    H_rl = st.columns(roll_ratios)
     for i, title in enumerate(roll_headers):
         with H_rl[i]:
             st.markdown(f"**{title}**")
@@ -1872,8 +2012,13 @@ if not alternative_rolls.empty:
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
+        if show_reserved_col:
+            with C[17]:  # Reserved For
+                st.write(_reserved_label(row))
 
     rl_group_keys = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
+    if "IsReserved" in alt_rolls_raw.columns and "IsReserved" in alternative_rolls.columns:
+        rl_group_keys.append("IsReserved")
 
     sync_detail_selection(
         alternative_rolls, alt_rolls_raw,
@@ -1911,6 +2056,15 @@ if not alternative_rolls.empty:
                     "Roll_Width", "Diameter", "Condition", "Mill", "Brand",
                     "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
                 ]
+
+                # Per-roll reservation detail, only when reserved stock is in the pool
+                if show_reserved_col and "IsReserved" in detail_rows.columns:
+                    detail_rows["Res"] = detail_rows["IsReserved"].map(
+                        lambda x: "🔒" if bool(x) else ""
+                    )
+                    inv_display_cols.insert(1, "Res")
+                    inv_display_cols += ["ResSONum", "ReserveSalesRep", "ResCust"]
+
                 available_display = [c for c in inv_display_cols if c in detail_rows.columns]
                 editor_df = detail_rows[available_display + ["_detail_id"]].copy()
 
@@ -2045,6 +2199,45 @@ if not selected_alt_rolls.empty and "Yield" in selected_alt_rolls.columns:
 
 total_alt_yield = total_alt_sheets_yield + total_alt_rolls_yield
 total_lbs = total_exact_lbs + total_alt_yield
+
+# --- Reserved material in the selection -----------------------------------
+# Exact matches are quoted at QtyOnHand; alternatives (sheets and rolls) at Yield.
+_reserved_lbs = 0.0
+_reserved_holders = []
+for _frame, _lbs_col in (
+    (selected_exact, "QtyOnHand"),
+    (selected_alt_sheets, "Yield"),
+    (selected_alt_rolls, "Yield"),
+):
+    if _frame is None or _frame.empty or "IsReserved" not in _frame.columns:
+        continue
+    _res = _frame[_frame["IsReserved"].fillna(False).astype(bool)]
+    if _res.empty:
+        continue
+    _col = _lbs_col if _lbs_col in _res.columns else "QtyOnHand"
+    _reserved_lbs += float(pd.to_numeric(_res.get(_col), errors="coerce").fillna(0.0).sum())
+    for _, _r in _res.iterrows():
+        _cust = _clean_val(_r.get("ResCust", ""))
+        _so = _clean_val(_r.get("ResSONum", ""))
+        _rep = _clean_val(_r.get("ReserveSalesRep", ""))
+        _who = f"{_cust} (SO# {_so})" if (_cust and _so) else (_cust or (f"SO# {_so}" if _so else ""))
+        if _rep:
+            _who = f"{_who} — {_rep}" if _who else _rep
+        if _who:
+            _reserved_holders.append(_who)
+_reserved_holders = sorted(set(_reserved_holders))
+
+if _reserved_lbs > 0:
+    _pct = (_reserved_lbs / total_lbs * 100.0) if total_lbs else 0.0
+    st.warning(
+        f"🔒 **Scenario includes reserved material** — {_reserved_lbs:,.0f} lbs "
+        f"({_pct:.0f}% of this quote) is currently reserved. "
+        "Confirm release with the owning sales rep before committing."
+    )
+    if _reserved_holders:
+        with st.expander(f"🔒 Reserved for ({len(_reserved_holders)})"):
+            for _h in _reserved_holders:
+                st.markdown(f"- {_h}")
 
 # Dollar values
 if not selected_exact.empty and set(["AvgCost", "QtyOnHand"]).issubset(selected_exact.columns):
@@ -2505,7 +2698,7 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
     mw_pct = sp.get("max_waste_pct", 10)
 
     # Filter to reservations older than 30 days
-    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=30)
+    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=RESERVED_MIN_AGE_DAYS)
     ri = reserve_inv_df[reserve_inv_df["ReserveDate"] <= cutoff_date].copy()
 
     # Apply same search filters as main inventory
@@ -2608,7 +2801,17 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
         ri_grouped = ri_grouped.sort_values("DaysReserved", ascending=False)
 
         st.markdown("---")
-        st.subheader("🔒 Reserved Inventory (> 30 days)")
+        st.subheader(f"🔒 Reserved Inventory (> {RESERVED_MIN_AGE_DAYS} days)")
+        if st.session_state.search_params.get("include_reserved"):
+            st.caption(
+                "These rolls/sheets are also selectable in the results above, flagged 🔒 "
+                "with their customer."
+            )
+        else:
+            st.caption(
+                "Reference only. Tick **Include reserved inventory** in the search form "
+                "to quote against these."
+            )
 
         # Build display dataframe
         ri_display = ri_grouped[[]].copy()
