@@ -2698,7 +2698,7 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
     mw_pct = sp.get("max_waste_pct", 10)
 
     # Filter to reservations older than 30 days
-    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=30)
+    cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=RESERVED_MIN_AGE_DAYS)
     ri = reserve_inv_df[reserve_inv_df["ReserveDate"] <= cutoff_date].copy()
 
     # Apply same search filters as main inventory
@@ -2801,7 +2801,17 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
         ri_grouped = ri_grouped.sort_values("DaysReserved", ascending=False)
 
         st.markdown("---")
-        st.subheader("🔒 Reserved Inventory (> 30 days)")
+        st.subheader(f"🔒 Reserved Inventory (> {RESERVED_MIN_AGE_DAYS} days)")
+        if st.session_state.search_params.get("include_reserved"):
+            st.caption(
+                "These rolls/sheets are also selectable in the results above, flagged 🔒 "
+                "with their customer."
+            )
+        else:
+            st.caption(
+                "Reference only. Tick **Include reserved inventory** in the search form "
+                "to quote against these."
+            )
 
         # Build display dataframe
         ri_display = ri_grouped[[]].copy()
