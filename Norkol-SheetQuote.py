@@ -808,7 +808,7 @@ with st.container():
         )
         if order_qty_unit == "Sheets":
             st.caption(
-                "Sheets mode requires exactly one Grade Name and one Basis Weight selected, "
+                "Order quantity in sheets requires exactly one Grade Name and one Basis Weight selected, "
                 "plus Sheet Width and Sheet Length."
             )
 
@@ -1453,12 +1453,19 @@ if search_btn:
     sheets_mode_errors = []
 
     if order_qty_unit == "Sheets":
+<<<<<<< Updated upstream
         if len(grade_names) != 1 or len(basis_weights) != 1:
             sheets_mode_errors.append("Quantity in sheet requires specific grade (1) and basis weight.")
+=======
+        if len(grade_names) != 1:
+            sheets_mode_errors.append("Order quantity in sheets: select exactly one Grade Name.")
+        if len(basis_weights) != 1:
+            sheets_mode_errors.append("Order quantity in sheets: select exactly one Basis Weight.")
+>>>>>>> Stashed changes
         if not sheet_width_input or not sheet_length_input:
-            sheets_mode_errors.append("Sheets mode: Sheet Width and Sheet Length are required.")
+            sheets_mode_errors.append("Order quantity in sheets: Sheet Width and Sheet Length are required.")
         if order_quantity <= 0:
-            sheets_mode_errors.append("Sheets mode: enter a positive Order Quantity in sheets.")
+            sheets_mode_errors.append("Order quantity in sheets: enter a positive Order Quantity in sheets.")
 
         area_in_for_conv = None
         bw_for_conv = None
@@ -1470,11 +1477,11 @@ if search_btn:
                 w_for_conv = float(str(sheet_width_input).strip())
                 l_for_conv = float(str(sheet_length_input).strip())
             except ValueError:
-                sheets_mode_errors.append("Sheets mode: Sheet Width and Sheet Length must be numeric.")
+                sheets_mode_errors.append("Order quantity in sheets: Sheet Width and Sheet Length must be numeric.")
             try:
                 bw_for_conv = float(basis_weights[0])
             except (TypeError, ValueError):
-                sheets_mode_errors.append("Sheets mode: Basis Weight must be numeric.")
+                sheets_mode_errors.append("Order quantity in sheets: Basis Weight must be numeric.")
             if grade_df is not None and "Description" in grade_df.columns:
                 gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
                 if not gm.empty:
@@ -1486,14 +1493,14 @@ if search_btn:
                         gsm_factor_for_conv = float(gsm_val)
             if area_in_for_conv is None:
                 sheets_mode_errors.append(
-                    f"Sheets mode: could not find Area(IN) for grade '{grade_names[0]}' in the Grade table."
+                    f"Order quantity in sheets: could not find Area(IN) for grade '{grade_names[0]}' in the Grade table."
                 )
             if basis_wt_unit == "GSM":
                 if gsm_factor_for_conv:
                     bw_for_conv = bw_for_conv / gsm_factor_for_conv
                 else:
                     sheets_mode_errors.append(
-                        f"Sheets mode (GSM): no GSM factor found for grade '{grade_names[0]}' in the Grade table."
+                        f"Order quantity in sheets (GSM): no GSM factor found for grade '{grade_names[0]}' in the Grade table."
                     )
 
         if sheets_mode_errors:
