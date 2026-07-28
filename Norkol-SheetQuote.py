@@ -1453,15 +1453,10 @@ if search_btn:
     sheets_mode_errors = []
 
     if order_qty_unit == "Sheets":
-<<<<<<< Updated upstream
-        if len(grade_names) != 1 or len(basis_weights) != 1:
-            sheets_mode_errors.append("Quantity in sheet requires specific grade (1) and basis weight.")
-=======
         if len(grade_names) != 1:
             sheets_mode_errors.append("Order quantity in sheets: select exactly one Grade Name.")
         if len(basis_weights) != 1:
             sheets_mode_errors.append("Order quantity in sheets: select exactly one Basis Weight.")
->>>>>>> Stashed changes
         if not sheet_width_input or not sheet_length_input:
             sheets_mode_errors.append("Order quantity in sheets: Sheet Width and Sheet Length are required.")
         if order_quantity <= 0:
