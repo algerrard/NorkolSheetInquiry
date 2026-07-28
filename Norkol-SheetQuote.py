@@ -2345,6 +2345,7 @@ blended_conv_cwt = 0.0
 final_conv_cwt = None
 order_qty_cost_cwt = None
 order_qty_cost_per_m = None
+conv_breakdown = None
 
 # Yield-weighted converting cost across BOTH alternative tables (sheets + rolls)
 alt_conv_dollar = 0.0
@@ -2476,6 +2477,15 @@ if (
     final_conv_dollar = max(surcharged_dollar, min_chg) if min_chg > 0 else surcharged_dollar
     final_conv_cwt = (final_conv_dollar / order_quantity_param) * 100.0
 
+    conv_breakdown = {
+        "base_cwt": blended_conv_cwt,
+        "surcharge_pct": surcharge_pct,
+        "surcharged_cwt": (surcharged_dollar / order_quantity_param) * 100.0,
+        "min_chg": min_chg,
+        "min_applies": min_chg > 0 and surcharged_dollar < min_chg,
+        "final_conv_cwt": final_conv_cwt,
+    }
+
     # Order Qty Cost = paper portion of blended + order-adjusted converting
     order_qty_cost_cwt = (blended_cost_cwt - blended_conv_cwt) + final_conv_cwt
     if mweight and mweight > 0:
@@ -2548,6 +2558,42 @@ with c10:
 
 if mweight_error:
     st.error(mweight_error)
+
+# --- Order Qty Cost breakdown (base rate, upcharge, minimum, freight) ---
+if conv_breakdown is not None and order_qty_cost_cwt is not None:
+    with st.expander("Order Qty Cost breakdown"):
+        paper_cwt = blended_cost_cwt - conv_breakdown["base_cwt"]
+        rows = [("Base converting rate", f"${conv_breakdown['base_cwt']:,.2f} / CWT")]
+        if conv_breakdown["surcharge_pct"] > 0:
+            rows.append((
+                "Order-qty upcharge",
+                f"+{conv_breakdown['surcharge_pct'] * 100:.0f}%  →  ${conv_breakdown['surcharged_cwt']:,.2f} / CWT",
+            ))
+        else:
+            rows.append(("Order-qty upcharge", "none"))
+        if conv_breakdown["min_chg"] > 0:
+            rows.append((
+                "Minimum charge",
+                f"${conv_breakdown['min_chg']:,.2f}"
+                + ("  (applied)" if conv_breakdown["min_applies"] else "  (not reached)"),
+            ))
+        else:
+            rows.append(("Minimum charge", "none"))
+        rows.append(("Converting cost for order", f"${conv_breakdown['final_conv_cwt']:,.2f} / CWT"))
+        rows.append(("Paper cost (blended)", f"${paper_cwt:,.2f} / CWT"))
+        if freight_cwt > 0:
+            rows.append((
+                "Freight",
+                f"${freight_cwt:,.2f} / CWT  (${freight_cost:,.2f} total)",
+            ))
+        else:
+            rows.append(("Freight", "none"))
+        rows.append((
+            "Order Qty Cost (total)",
+            f"${order_qty_cost_cwt:,.2f} / CWT"
+            + (f"  ·  ${order_qty_cost_per_m:,.2f} / M Sheets" if order_qty_cost_per_m is not None else ""),
+        ))
+        st.table(pd.DataFrame(rows, columns=["Item", "Amount"]).set_index("Item"))
 
 if selected_exact.empty and selected_alt_sheets.empty and selected_alt_rolls.empty:
     st.info("No rows selected yet above.")
