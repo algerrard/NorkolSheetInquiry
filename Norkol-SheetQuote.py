@@ -252,6 +252,65 @@ def get_order_size_pct(adj_df, process, description, order_qty):
 
 
 # =========================================================
+# SHEETS -> POUNDS
+# =========================================================
+def sheets_to_lbs(sheets, sheet_width, sheet_length, basis_wt_lbs, area_in):
+    """
+    Weight of N sheets: sheets * W * L * BasisWt(lbs) / (500 * Area(IN)).
+
+    Equivalent to (sheets / 1000) * Mweight, where
+    Mweight = ((W * L) / Area(IN)) * BasisWt(lbs) * 2.
+    """
+    try:
+        if not (sheets and sheet_width and sheet_length and basis_wt_lbs and area_in):
+            return None
+        return (
+            float(sheets) * float(sheet_width) * float(sheet_length) * float(basis_wt_lbs)
+        ) / (500.0 * float(area_in))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def make_qty_lbs_fn(params):
+    """
+    Sheets-mode order quantity resolver.
+
+    When the order is entered in sheets the pounds depend on basis weight, so a
+    single order-quantity-in-lbs cannot be known before lots are picked. Returns
+    a callable row -> lbs that derives the weight from that row's own BasisWt /
+    BasisWtUOM, letting a search span multiple basis weights. Grade — and with it
+    Area(IN) — is fixed for the search, so only basis weight varies.
+
+    Returns None in LBS mode, or when the sheets inputs are incomplete, in which
+    case callers fall back to the single order-quantity-in-lbs scalar.
+    """
+    if params.get("order_qty_unit") != "Sheets":
+        return None
+
+    sheets = params.get("order_quantity_sheets")
+    area_in = params.get("sheets_area_in")
+    width = params.get("sheets_width")
+    length = params.get("sheets_length")
+    gsm_factor = params.get("sheets_gsm_factor")
+
+    if not (sheets and area_in and width and length):
+        return None
+
+    def _qty_lbs(row):
+        basis_wt = pd.to_numeric(row.get("BasisWt"), errors="coerce")
+        if pd.isna(basis_wt) or basis_wt <= 0:
+            return None
+        uom = str(row.get("BasisWtUOM", "LB") or "LB").strip().upper()
+        if uom == "GSM":
+            if not gsm_factor:
+                return None
+            basis_wt = basis_wt / gsm_factor
+        return sheets_to_lbs(sheets, width, length, basis_wt, area_in)
+
+    return _qty_lbs
+
+
+# =========================================================
 # CONVERTING COST CALCULATION
 # =========================================================
 def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, machine_info_df, order_quantity=None, order_size_adj_df=None):
@@ -449,7 +508,19 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
     basis_wt_list = search_params.get("basis_weights") or []
     caliper_list = search_params.get("calipers") or []
     grade_list = search_params.get("grade_names") or []
-    
+
+    # In sheets mode the pounds are resolved from the selected lots, so they arrive
+    # via summary_data rather than the search params.
+    _oq_sheets = search_params.get("order_quantity_sheets")
+    _oq_lbs = search_params.get("order_quantity") or (summary_data or {}).get("order_qty")
+    if search_params.get("order_qty_unit") == "Sheets" and _oq_sheets:
+        _oq_text = f"{_oq_sheets:,} sheets" + (f" ({_oq_lbs:,.0f} lbs)" if _oq_lbs else "")
+    elif _oq_lbs:
+        _oq_text = f"{_oq_lbs:,.0f} lbs"
+    else:
+        _oq_text = "Not specified"
+
+
     param_data = [
         ["Warehouse Group:", str(search_params.get("warehouse_group") or "All")],
         ["Product Group:", str(search_params.get("product_group") or "All")],
@@ -459,11 +530,7 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Sheet Width:", f"{search_params.get('sheet_width_input')}\"" if search_params.get("sheet_width_input") else "Not specified"],
         ["Sheet Length:", f"{search_params.get('sheet_length_input')}\"" if search_params.get("sheet_length_input") else "Not specified"],
         ["Max Waste %:", f"{search_params.get('max_waste_pct')}%" if search_params.get("max_waste_pct") is not None else "Not specified"],
-        ["Order Quantity:", (
-            f"{search_params.get('order_quantity_sheets'):,} sheets ({search_params.get('order_quantity'):,.0f} lbs)"
-            if search_params.get("order_qty_unit") == "Sheets" and search_params.get("order_quantity_sheets")
-            else f"{search_params.get('order_quantity'):,.0f} lbs"
-        ) if search_params.get("order_quantity") else "Not specified"],
+        ["Order Quantity:", _oq_text],
     ]
     
     param_table = Table(param_data, colWidths=[1.5*inch, 4*inch])
@@ -808,17 +875,14 @@ with st.container():
         )
         if order_qty_unit == "Sheets":
             st.caption(
-                "Order quantity in sheets requires exactly one Grade Name and one Basis Weight selected, "
-                "plus Sheet Width and Sheet Length."
+                "Order quantity in sheets requires exactly one Grade Name, plus Sheet Width "
+                "and Sheet Length. Multiple basis weights are allowed — the order weight is "
+                "resolved from the lots you select."
             )
 
-            preview_mweight = None
-            preview_lbs = None
             preview_missing = []
             if len(grade_names) != 1:
                 preview_missing.append("one Grade Name")
-            if len(basis_weights) != 1:
-                preview_missing.append("one Basis Weight")
             try:
                 _w_pv = float(str(sheet_width_input).strip()) if sheet_width_input else None
             except ValueError:
@@ -844,35 +908,53 @@ with st.container():
                     if pd.notna(_gv) and float(_gv) > 0:
                         _gsm_factor_pv = float(_gv)
 
-            if (
-                not preview_missing
-                and order_quantity
-                and order_quantity > 0
-                and _area_pv
-                and len(basis_weights) == 1
-            ):
-                try:
-                    _bw_pv = float(basis_weights[0])
+            # One MWeight / lbs estimate per basis weight the user has filtered on.
+            # The radio is what the typed filter values mean; the actual results use
+            # each inventory row's own BasisWtUOM.
+            preview_rows = []
+            if not preview_missing and order_quantity and order_quantity > 0 and _area_pv:
+                for _bw_raw in basis_weights:
+                    try:
+                        _bw_pv = float(_bw_raw)
+                    except (TypeError, ValueError):
+                        continue
                     if basis_wt_unit == "GSM":
-                        if _gsm_factor_pv:
-                            _bw_pv = _bw_pv / _gsm_factor_pv
-                        else:
-                            _bw_pv = None
-                    if _bw_pv is not None:
-                        preview_lbs = (int(order_quantity) * _w_pv * _l_pv * _bw_pv) / (500.0 * _area_pv)
-                        preview_mweight = (preview_lbs / int(order_quantity)) * 1000.0
-                except (TypeError, ValueError):
-                    pass
+                        if not _gsm_factor_pv:
+                            continue
+                        _bw_pv = _bw_pv / _gsm_factor_pv
+                    _lbs_pv = sheets_to_lbs(int(order_quantity), _w_pv, _l_pv, _bw_pv, _area_pv)
+                    if _lbs_pv is None:
+                        continue
+                    preview_rows.append({
+                        "Basis Wt": _bw_raw,
+                        "MWeight": round((_lbs_pv / int(order_quantity)) * 1000.0, 1),
+                        "Est. lbs": round(_lbs_pv),
+                    })
 
             if basis_wt_unit == "GSM" and len(grade_names) == 1 and _gsm_factor_pv is None:
                 st.caption("⚠️ GSM mode: no GSM factor found for the selected grade — MWeight/lbs preview disabled.")
 
-            if preview_mweight is not None and preview_lbs is not None:
+            if len(preview_rows) == 1:
                 pc1, pc2 = st.columns(2)
                 with pc1:
-                    st.metric("MWeight (lbs/1000 sheets)", f"{preview_mweight:,.1f}")
+                    st.metric("MWeight (lbs/1000 sheets)", f"{preview_rows[0]['MWeight']:,.1f}")
                 with pc2:
-                    st.metric("Estimated lbs", f"{preview_lbs:,.0f}")
+                    st.metric("Estimated lbs", f"{preview_rows[0]['Est. lbs']:,.0f}")
+            elif len(preview_rows) > 1:
+                _lo = min(r["Est. lbs"] for r in preview_rows)
+                _hi = max(r["Est. lbs"] for r in preview_rows)
+                st.caption(f"{int(order_quantity):,} sheets ≈ {_lo:,.0f}–{_hi:,.0f} lbs across the selected basis weights:")
+                st.dataframe(
+                    pd.DataFrame(preview_rows),
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "MWeight": st.column_config.NumberColumn("MWeight", format="%.1f"),
+                        "Est. lbs": st.column_config.NumberColumn("Est. lbs", format="%d"),
+                    },
+                )
+            elif not preview_missing and order_quantity and order_quantity > 0 and _area_pv:
+                st.caption("No basis weight filter — MWeight will be resolved from the lots you select.")
 
         freight_cost = st.number_input(
             "Freight Cost (total $, optional)",
@@ -978,7 +1060,44 @@ def _detect_inv_col(df):
     return None
 
 
-def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_df):
+def _apply_run_waste(out, order_quantity, order_size_adj_df, qty_lbs_fn):
+    """
+    Apply the RunWaste bracket to an aggregated frame.
+
+    LBS mode uses a single bracket for the whole job. Sheets mode resolves the
+    bracket per group row from that group's own basis weight — group keys already
+    include BasisWt, and a heavier sheet is genuinely more pounds for the same
+    sheet count, so the per-group bracket is the more accurate of the two.
+    """
+    if out is None or out.empty or order_size_adj_df is None:
+        return out
+
+    if qty_lbs_fn is not None:
+        oq_lbs = out.apply(qty_lbs_fn, axis=1)
+        out["OrderQtyLbs"] = oq_lbs
+        run_waste = oq_lbs.map(
+            lambda q: get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", q)
+            if q
+            else 0.0
+        )
+    elif order_quantity is not None:
+        run_waste = pd.Series(
+            get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity),
+            index=out.index,
+        )
+    else:
+        return out
+
+    out["RunWastePct"] = run_waste
+    if "Yield" in out.columns:
+        out["Yield"] = out["Yield"] * (1 - run_waste)
+    if "NetAvgCost" in out.columns:
+        out["NetAvgCost"] = out["NetAvgCost"] * (1 + run_waste)
+    return out
+
+
+def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_df,
+                          qty_lbs_fn=None):
     """Aggregate raw alt-sheet rows into group rows with derived metrics."""
     if al_sh is None or al_sh.empty:
         return pd.DataFrame()
@@ -1025,13 +1144,7 @@ def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_
         out["AvgCost"] = np.nan
         out["NetAvgCost"] = np.nan
 
-    if order_quantity is not None and order_size_adj_df is not None:
-        run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
-        out["RunWastePct"] = run_waste_pct
-        if "Yield" in out.columns:
-            out["Yield"] = out["Yield"] * (1 - run_waste_pct)
-        if "NetAvgCost" in out.columns:
-            out["NetAvgCost"] = out["NetAvgCost"] * (1 + run_waste_pct)
+    out = _apply_run_waste(out, order_quantity, order_size_adj_df, qty_lbs_fn)
 
     # Trimmer converting cost
     per_cwt_rate = None
@@ -1061,7 +1174,7 @@ def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_
 
 
 def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_df,
-                         grade_df, paper_info_df, machine_info_df):
+                         grade_df, paper_info_df, machine_info_df, qty_lbs_fn=None):
     """Aggregate raw roll rows into group rows with derived metrics."""
     if al_rl is None or al_rl.empty:
         return pd.DataFrame()
@@ -1106,13 +1219,7 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
         out["AvgCost"] = np.nan
         out["NetAvgCost"] = np.nan
 
-    if order_quantity is not None and order_size_adj_df is not None:
-        run_waste_pct = get_order_size_pct(order_size_adj_df, "Sheeter", "RunWaste", order_quantity)
-        out["RunWastePct"] = run_waste_pct
-        if "Yield" in out.columns:
-            out["Yield"] = out["Yield"] * (1 - run_waste_pct)
-        if "NetAvgCost" in out.columns:
-            out["NetAvgCost"] = out["NetAvgCost"] * (1 + run_waste_pct)
+    out = _apply_run_waste(out, order_quantity, order_size_adj_df, qty_lbs_fn)
 
     if (
         not out.empty
@@ -1209,8 +1316,12 @@ def run_search(params):
     order_quantity = params.get("order_quantity")
     include_reserved = params.get("include_reserved", False)
 
-    if not order_quantity:
-        st.error("Order quantity in lbs must be provided")
+    # Sheets mode has no single order-quantity-in-lbs until lots are selected;
+    # it carries a per-basis-weight resolver instead.
+    qty_lbs_fn = make_qty_lbs_fn(params)
+
+    if not order_quantity and qty_lbs_fn is None:
+        st.error("Order quantity must be provided")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None, pd.DataFrame(), pd.DataFrame()
 
     filtered = df.copy()
@@ -1434,11 +1545,12 @@ def run_search(params):
         roll_results["_detail_id"] = roll_results.index.astype(int)
 
     alternative_sheets = aggregate_alt_sheets(
-        alt_sheets, order_quantity, order_size_adj_df, machine_info_df
+        alt_sheets, order_quantity, order_size_adj_df, machine_info_df,
+        qty_lbs_fn=qty_lbs_fn,
     )
     alternative_rolls = aggregate_alt_rolls(
         roll_results, requested_width, order_quantity, order_size_adj_df,
-        grade_df, paper_info_df, machine_info_df,
+        grade_df, paper_info_df, machine_info_df, qty_lbs_fn=qty_lbs_fn,
     )
 
     return exact_matches, alternative_sheets, alternative_rolls, requested_width, alt_sheets, roll_results
@@ -1450,33 +1562,29 @@ def run_search(params):
 if search_btn:
     order_quantity_lbs = order_quantity
     order_quantity_sheets = None
+    area_in_for_conv = None
+    w_for_conv = None
+    l_for_conv = None
+    gsm_factor_for_conv = None
     sheets_mode_errors = []
 
     if order_qty_unit == "Sheets":
+        # Basis weight is deliberately NOT constrained here: the pounds behind a
+        # sheet count are resolved per basis weight during the search, and finally
+        # from the lots the user selects. Grade stays single so Area(IN) is fixed.
         if len(grade_names) != 1:
             sheets_mode_errors.append("Order quantity in sheets: select exactly one Grade Name.")
-        if len(basis_weights) != 1:
-            sheets_mode_errors.append("Order quantity in sheets: select exactly one Basis Weight.")
         if not sheet_width_input or not sheet_length_input:
             sheets_mode_errors.append("Order quantity in sheets: Sheet Width and Sheet Length are required.")
         if order_quantity <= 0:
             sheets_mode_errors.append("Order quantity in sheets: enter a positive Order Quantity in sheets.")
 
-        area_in_for_conv = None
-        bw_for_conv = None
-        w_for_conv = None
-        l_for_conv = None
-        gsm_factor_for_conv = None
         if not sheets_mode_errors:
             try:
                 w_for_conv = float(str(sheet_width_input).strip())
                 l_for_conv = float(str(sheet_length_input).strip())
             except ValueError:
                 sheets_mode_errors.append("Order quantity in sheets: Sheet Width and Sheet Length must be numeric.")
-            try:
-                bw_for_conv = float(basis_weights[0])
-            except (TypeError, ValueError):
-                sheets_mode_errors.append("Order quantity in sheets: Basis Weight must be numeric.")
             if grade_df is not None and "Description" in grade_df.columns:
                 gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
                 if not gm.empty:
@@ -1490,23 +1598,23 @@ if search_btn:
                 sheets_mode_errors.append(
                     f"Order quantity in sheets: could not find Area(IN) for grade '{grade_names[0]}' in the Grade table."
                 )
-            if basis_wt_unit == "GSM":
-                if gsm_factor_for_conv:
-                    bw_for_conv = bw_for_conv / gsm_factor_for_conv
-                else:
-                    sheets_mode_errors.append(
-                        f"Order quantity in sheets (GSM): no GSM factor found for grade '{grade_names[0]}' in the Grade table."
-                    )
 
         if sheets_mode_errors:
             for err in sheets_mode_errors:
                 st.error(err)
             st.stop()
 
+        if not gsm_factor_for_conv:
+            # Not fatal: only GSM-denominated inventory rows need the factor.
+            st.warning(
+                f"No GSM factor found for grade '{grade_names[0]}' — any GSM-denominated "
+                "lots will not carry an order-size run waste adjustment."
+            )
+
         order_quantity_sheets = int(order_quantity)
-        order_quantity_lbs = (
-            order_quantity_sheets * w_for_conv * l_for_conv * bw_for_conv
-        ) / (500.0 * area_in_for_conv)
+        # Pounds stay unknown until lots are selected, since they depend on the
+        # basis weight of whatever the user ends up picking.
+        order_quantity_lbs = None
 
     # new search → persist params and clear selections
     st.session_state.search_params = {
@@ -1521,6 +1629,11 @@ if search_btn:
         "order_quantity": order_quantity_lbs,
         "order_qty_unit": order_qty_unit,
         "order_quantity_sheets": order_quantity_sheets,
+        "sheets_area_in": area_in_for_conv,
+        "sheets_gsm_factor": gsm_factor_for_conv,
+        "sheets_width": w_for_conv,
+        "sheets_length": l_for_conv,
+        "basis_wt_unit": basis_wt_unit,
         "include_reserved": include_reserved,
     }
     st.session_state.sel_exact_idx = set()
@@ -2150,6 +2263,9 @@ selected_exact = (
 # so the summary reflects exactly the rolls checked in the detail expanders.
 _sp = st.session_state.search_params
 _order_qty = _sp.get("order_quantity")
+# Sheets mode: same per-basis-weight resolver the search used, so the re-aggregated
+# selection carries the same run waste as the rows the user was looking at.
+_qty_lbs_fn = make_qty_lbs_fn(_sp)
 _req_width = None
 try:
     _req_width = float(str(_sp.get("sheet_width_input")).strip()) if _sp.get("sheet_width_input") else None
@@ -2164,7 +2280,8 @@ if (
         alt_sheets_raw["_detail_id"].astype(int).isin(st.session_state.sel_alt_sheets_detail)
     ]
     selected_alt_sheets = aggregate_alt_sheets(
-        _picked_sh, _order_qty, order_size_adj_df, machine_info_df
+        _picked_sh, _order_qty, order_size_adj_df, machine_info_df,
+        qty_lbs_fn=_qty_lbs_fn,
     )
 else:
     selected_alt_sheets = pd.DataFrame()
@@ -2178,7 +2295,7 @@ if (
     ]
     selected_alt_rolls = aggregate_alt_rolls(
         _picked_rl, _req_width, _order_qty, order_size_adj_df,
-        grade_df, paper_info_df, machine_info_df,
+        grade_df, paper_info_df, machine_info_df, qty_lbs_fn=_qty_lbs_fn,
     )
 else:
     selected_alt_rolls = pd.DataFrame()
@@ -2339,8 +2456,21 @@ est_sheets = None
 if mweight and mweight > 0 and total_lbs > 0:
     est_sheets = (total_lbs / mweight) * 1000
 
-# --- Blended converting cost (raw) and order-adjusted converting cost ---
+# --- Order quantity in lbs ---
+# LBS mode has it from the search form. Sheets mode defers it to here: the pounds
+# behind the requested sheet count follow from the Mweight of the selected lots,
+# so it stays None until a selection resolves a single Mweight. Everything
+# downstream (surcharge bracket, machine minimum, freight) is unchanged.
 order_quantity_param = st.session_state.search_params.get("order_quantity")
+_sheets_requested = st.session_state.search_params.get("order_quantity_sheets")
+if st.session_state.search_params.get("order_qty_unit") == "Sheets":
+    order_quantity_param = (
+        (_sheets_requested * mweight) / 1000.0
+        if (_sheets_requested and mweight and mweight > 0)
+        else None
+    )
+
+# --- Blended converting cost (raw) and order-adjusted converting cost ---
 blended_conv_cwt = 0.0
 final_conv_cwt = None
 order_qty_cost_cwt = None
@@ -2530,15 +2660,19 @@ with c6:
 with c7:
     st.metric("Est. Sheets", f"{est_sheets:,.0f}" if est_sheets is not None else "—")
 with c8:
-    if order_quantity_param:
-        sheets_param = st.session_state.search_params.get("order_quantity_sheets")
-        if st.session_state.search_params.get("order_qty_unit") == "Sheets" and sheets_param:
-            oq_value = f"{sheets_param:,} sht"
-            oq_help = f"≈ {order_quantity_param:,.0f} lbs (converted from {sheets_param:,} sheets)"
-        else:
-            oq_value = f"{order_quantity_param:,.0f} lbs"
-            oq_help = None
+    sheets_param = st.session_state.search_params.get("order_quantity_sheets")
+    _sheets_mode = st.session_state.search_params.get("order_qty_unit") == "Sheets"
+    if _sheets_mode and sheets_param:
+        # Sheets are known from the search; pounds only once a selection fixes Mweight.
+        oq_value = f"{sheets_param:,} sht"
+        oq_help = (
+            f"≈ {order_quantity_param:,.0f} lbs (converted from {sheets_param:,} sheets)"
+            if order_quantity_param
+            else "Weight pending — select lots with a single basis weight to resolve Mweight."
+        )
         st.metric("Order Qty", oq_value, help=oq_help)
+    elif order_quantity_param:
+        st.metric("Order Qty", f"{order_quantity_param:,.0f} lbs")
     else:
         st.metric("Order Qty", "—")
 with c9:
@@ -2674,7 +2808,12 @@ if not export_df.empty:
         f"Blended Cost / CWT,${blended_cost_cwt:,.2f}",
         f"Cost Per M Sheets,${cost_per_m:,.2f}" if cost_per_m is not None else "Cost Per M Sheets,—",
         f"Estimated Sheets,{est_sheets:,.0f}" if est_sheets is not None else "Estimated Sheets,—",
-        f"Order Qty,{order_quantity_param:,.0f} lbs" if order_quantity_param else "Order Qty,—",
+        (
+            f"Order Qty,{_sheets_requested:,} sheets"
+            + (f" (≈ {order_quantity_param:,.0f} lbs)" if order_quantity_param else "")
+            if (st.session_state.search_params.get("order_qty_unit") == "Sheets" and _sheets_requested)
+            else (f"Order Qty,{order_quantity_param:,.0f} lbs" if order_quantity_param else "Order Qty,—")
+        ),
     ]
     if freight_cwt > 0:
         footer_rows.extend([
