@@ -271,15 +271,19 @@ def sheets_to_lbs(sheets, sheet_width, sheet_length, basis_wt_lbs, area_in):
         return None
 
 
-def make_qty_lbs_fn(params):
+def make_qty_lbs_fn(params, grade_df=None):
     """
     Sheets-mode order quantity resolver.
 
-    When the order is entered in sheets the pounds depend on basis weight, so a
-    single order-quantity-in-lbs cannot be known before lots are picked. Returns
-    a callable row -> lbs that derives the weight from that row's own BasisWt /
-    BasisWtUOM, letting a search span multiple basis weights. Grade — and with it
-    Area(IN) — is fixed for the search, so only basis weight varies.
+    When the order is entered in sheets the pounds depend on both basis weight
+    (BasisWt) and grade (Area(IN)), so a single order-quantity-in-lbs cannot be
+    known before lots are picked. Returns a callable row -> lbs that derives the
+    weight from that row's own GradeID / BasisWt / BasisWtUOM, letting a search
+    span multiple grades and basis weights. Consistency is enforced later, at the
+    quoting level, where a single Mweight has to exist.
+
+    Falls back to the search-level Area(IN) / GSM factor (set when exactly one
+    grade is selected) for rows carrying no usable GradeID.
 
     Returns None in LBS mode, or when the sheets inputs are incomplete, in which
     case callers fall back to the single order-quantity-in-lbs scalar.
@@ -288,15 +292,42 @@ def make_qty_lbs_fn(params):
         return None
 
     sheets = params.get("order_quantity_sheets")
-    area_in = params.get("sheets_area_in")
     width = params.get("sheets_width")
     length = params.get("sheets_length")
-    gsm_factor = params.get("sheets_gsm_factor")
+    default_area = params.get("sheets_area_in")
+    default_gsm = params.get("sheets_gsm_factor")
 
-    if not (sheets and area_in and width and length):
+    # GradeID -> (Area(IN), GSM factor), so each row can resolve its own grade.
+    grade_lookup = {}
+    if grade_df is not None and "GradeID" in grade_df.columns:
+        for _, _g in grade_df.iterrows():
+            _gid = str(_g.get("GradeID", "") or "").strip()
+            if not _gid:
+                continue
+            _a = _g.get("Area(IN)")
+            _s = _g.get("GSM")
+            grade_lookup[_gid] = (
+                float(_a) if pd.notna(_a) and float(_a) > 0 else None,
+                float(_s) if pd.notna(_s) and float(_s) > 0 else None,
+            )
+
+    if not (sheets and width and length):
+        return None
+    if not default_area and not grade_lookup:
         return None
 
     def _qty_lbs(row):
+        area_in, gsm_factor = default_area, default_gsm
+        grade_id = str(row.get("GradeID", "") or "").strip()
+        if grade_id and grade_id in grade_lookup:
+            _a, _s = grade_lookup[grade_id]
+            if _a:
+                area_in = _a
+            if _s:
+                gsm_factor = _s
+        if not area_in:
+            return None
+
         basis_wt = pd.to_numeric(row.get("BasisWt"), errors="coerce")
         if pd.isna(basis_wt) or basis_wt <= 0:
             return None
@@ -875,14 +906,13 @@ with st.container():
         )
         if order_qty_unit == "Sheets":
             st.caption(
-                "Order quantity in sheets requires exactly one Grade Name, plus Sheet Width "
-                "and Sheet Length. Multiple basis weights are allowed — the order weight is "
-                "resolved from the lots you select."
+                "Order quantity in sheets requires Sheet Width and Sheet Length. Search as "
+                "broadly as you like across grades and basis weights — the order weight is "
+                "resolved from the lots you select, which must land on a single grade and "
+                "basis weight to quote."
             )
 
             preview_missing = []
-            if len(grade_names) != 1:
-                preview_missing.append("one Grade Name")
             try:
                 _w_pv = float(str(sheet_width_input).strip()) if sheet_width_input else None
             except ValueError:
@@ -896,43 +926,51 @@ with st.container():
             if not _l_pv:
                 preview_missing.append("Sheet Length")
 
-            _area_pv = None
-            _gsm_factor_pv = None
-            if len(grade_names) == 1 and grade_df is not None and "Description" in grade_df.columns:
-                _gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
-                if not _gm.empty:
+            # Area(IN) / GSM factor per selected grade.
+            _grades_pv = []
+            if grade_names and grade_df is not None and "Description" in grade_df.columns:
+                for _gn in grade_names:
+                    _gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(_gn).strip()]
+                    if _gm.empty:
+                        continue
                     _av = _gm.iloc[0].get("Area(IN)")
-                    if pd.notna(_av) and float(_av) > 0:
-                        _area_pv = float(_av)
                     _gv = _gm.iloc[0].get("GSM")
-                    if pd.notna(_gv) and float(_gv) > 0:
-                        _gsm_factor_pv = float(_gv)
+                    _grades_pv.append((
+                        _gn,
+                        float(_av) if pd.notna(_av) and float(_av) > 0 else None,
+                        float(_gv) if pd.notna(_gv) and float(_gv) > 0 else None,
+                    ))
 
-            # One MWeight / lbs estimate per basis weight the user has filtered on.
+            # One MWeight / lbs estimate per grade x basis weight the user filtered on.
             # The radio is what the typed filter values mean; the actual results use
             # each inventory row's own BasisWtUOM.
+            _have_inputs = bool(not preview_missing and order_quantity and order_quantity > 0)
             preview_rows = []
-            if not preview_missing and order_quantity and order_quantity > 0 and _area_pv:
-                for _bw_raw in basis_weights:
-                    try:
-                        _bw_pv = float(_bw_raw)
-                    except (TypeError, ValueError):
+            if _have_inputs:
+                for _gn, _area_g, _gsm_g in _grades_pv:
+                    if not _area_g:
                         continue
-                    if basis_wt_unit == "GSM":
-                        if not _gsm_factor_pv:
+                    for _bw_raw in basis_weights:
+                        try:
+                            _bw_pv = float(_bw_raw)
+                        except (TypeError, ValueError):
                             continue
-                        _bw_pv = _bw_pv / _gsm_factor_pv
-                    _lbs_pv = sheets_to_lbs(int(order_quantity), _w_pv, _l_pv, _bw_pv, _area_pv)
-                    if _lbs_pv is None:
-                        continue
-                    preview_rows.append({
-                        "Basis Wt": _bw_raw,
-                        "MWeight": round((_lbs_pv / int(order_quantity)) * 1000.0, 1),
-                        "Est. lbs": round(_lbs_pv),
-                    })
+                        if basis_wt_unit == "GSM":
+                            if not _gsm_g:
+                                continue
+                            _bw_pv = _bw_pv / _gsm_g
+                        _lbs_pv = sheets_to_lbs(int(order_quantity), _w_pv, _l_pv, _bw_pv, _area_g)
+                        if _lbs_pv is None:
+                            continue
+                        preview_rows.append({
+                            "Grade": _gn,
+                            "Basis Wt": _bw_raw,
+                            "MWeight": round((_lbs_pv / int(order_quantity)) * 1000.0, 1),
+                            "Est. lbs": round(_lbs_pv),
+                        })
 
-            if basis_wt_unit == "GSM" and len(grade_names) == 1 and _gsm_factor_pv is None:
-                st.caption("⚠️ GSM mode: no GSM factor found for the selected grade — MWeight/lbs preview disabled.")
+            if basis_wt_unit == "GSM" and _grades_pv and all(g[2] is None for g in _grades_pv):
+                st.caption("⚠️ GSM mode: no GSM factor found for the selected grade(s) — MWeight/lbs preview disabled.")
 
             if len(preview_rows) == 1:
                 pc1, pc2 = st.columns(2)
@@ -943,9 +981,13 @@ with st.container():
             elif len(preview_rows) > 1:
                 _lo = min(r["Est. lbs"] for r in preview_rows)
                 _hi = max(r["Est. lbs"] for r in preview_rows)
-                st.caption(f"{int(order_quantity):,} sheets ≈ {_lo:,.0f}–{_hi:,.0f} lbs across the selected basis weights:")
+                _span = "basis weights" if len(_grades_pv) < 2 else "grades and basis weights"
+                st.caption(f"{int(order_quantity):,} sheets ≈ {_lo:,.0f}–{_hi:,.0f} lbs across the selected {_span}:")
+                _pv_df = pd.DataFrame(preview_rows)
+                if len(_grades_pv) < 2:
+                    _pv_df = _pv_df.drop(columns=["Grade"])
                 st.dataframe(
-                    pd.DataFrame(preview_rows),
+                    _pv_df,
                     hide_index=True,
                     use_container_width=True,
                     column_config={
@@ -953,8 +995,11 @@ with st.container():
                         "Est. lbs": st.column_config.NumberColumn("Est. lbs", format="%d"),
                     },
                 )
-            elif not preview_missing and order_quantity and order_quantity > 0 and _area_pv:
-                st.caption("No basis weight filter — MWeight will be resolved from the lots you select.")
+            elif _have_inputs:
+                st.caption(
+                    "MWeight will be resolved from the lots you select — narrow the grade "
+                    "and basis weight filters to preview it here."
+                )
 
         freight_cost = st.number_input(
             "Freight Cost (total $, optional)",
@@ -1318,7 +1363,7 @@ def run_search(params):
 
     # Sheets mode has no single order-quantity-in-lbs until lots are selected;
     # it carries a per-basis-weight resolver instead.
-    qty_lbs_fn = make_qty_lbs_fn(params)
+    qty_lbs_fn = make_qty_lbs_fn(params, grade_df)
 
     if not order_quantity and qty_lbs_fn is None:
         st.error("Order quantity must be provided")
@@ -1569,11 +1614,10 @@ if search_btn:
     sheets_mode_errors = []
 
     if order_qty_unit == "Sheets":
-        # Basis weight is deliberately NOT constrained here: the pounds behind a
-        # sheet count are resolved per basis weight during the search, and finally
-        # from the lots the user selects. Grade stays single so Area(IN) is fixed.
-        if len(grade_names) != 1:
-            sheets_mode_errors.append("Order quantity in sheets: select exactly one Grade Name.")
+        # Neither grade nor basis weight is constrained here. The pounds behind a
+        # sheet count are resolved per grade + basis weight during the search, and
+        # finally from the lots the user selects. Consistency is enforced at the
+        # quoting level instead, where a single Mweight has to exist.
         if not sheet_width_input or not sheet_length_input:
             sheets_mode_errors.append("Order quantity in sheets: Sheet Width and Sheet Length are required.")
         if order_quantity <= 0:
@@ -1585,7 +1629,11 @@ if search_btn:
                 l_for_conv = float(str(sheet_length_input).strip())
             except ValueError:
                 sheets_mode_errors.append("Order quantity in sheets: Sheet Width and Sheet Length must be numeric.")
-            if grade_df is not None and "Description" in grade_df.columns:
+
+            # A single grade still pins Area(IN) up front, which drives the preview
+            # and covers rows with no usable GradeID. Multiple grades rely on the
+            # per-row GradeID lookup instead.
+            if len(grade_names) == 1 and grade_df is not None and "Description" in grade_df.columns:
                 gm = grade_df[grade_df["Description"].astype(str).str.strip() == str(grade_names[0]).strip()]
                 if not gm.empty:
                     area_val = gm.iloc[0].get("Area(IN)")
@@ -1594,9 +1642,12 @@ if search_btn:
                     gsm_val = gm.iloc[0].get("GSM")
                     if pd.notna(gsm_val) and float(gsm_val) > 0:
                         gsm_factor_for_conv = float(gsm_val)
-            if area_in_for_conv is None:
+
+            _can_lookup_by_grade_id = grade_df is not None and "GradeID" in grade_df.columns
+            if area_in_for_conv is None and not _can_lookup_by_grade_id:
                 sheets_mode_errors.append(
-                    f"Order quantity in sheets: could not find Area(IN) for grade '{grade_names[0]}' in the Grade table."
+                    "Order quantity in sheets: could not determine Area(IN). Select a single "
+                    "grade that exists in the Grade table, or restore the Grade table."
                 )
 
         if sheets_mode_errors:
@@ -1604,8 +1655,9 @@ if search_btn:
                 st.error(err)
             st.stop()
 
-        if not gsm_factor_for_conv:
-            # Not fatal: only GSM-denominated inventory rows need the factor.
+        if len(grade_names) == 1 and not gsm_factor_for_conv:
+            # Not fatal: only GSM-denominated inventory rows need the factor, and
+            # rows carrying a GradeID resolve their own.
             st.warning(
                 f"No GSM factor found for grade '{grade_names[0]}' — any GSM-denominated "
                 "lots will not carry an order-size run waste adjustment."
@@ -2265,7 +2317,7 @@ _sp = st.session_state.search_params
 _order_qty = _sp.get("order_quantity")
 # Sheets mode: same per-basis-weight resolver the search used, so the re-aggregated
 # selection carries the same run waste as the rows the user was looking at.
-_qty_lbs_fn = make_qty_lbs_fn(_sp)
+_qty_lbs_fn = make_qty_lbs_fn(_sp, grade_df)
 _req_width = None
 try:
     _req_width = float(str(_sp.get("sheet_width_input")).strip()) if _sp.get("sheet_width_input") else None
@@ -2394,56 +2446,86 @@ params = st.session_state.search_params
 sheet_width = params.get("sheet_width_input")
 sheet_length = params.get("sheet_length_input")
 
+# Combine all selected rows to get GradeID and BasisWt
+combined_selected = pd.concat([selected_exact, selected_alt_sheets, selected_alt_rolls], ignore_index=True) if (
+    not selected_exact.empty or not selected_alt_sheets.empty or not selected_alt_rolls.empty
+) else pd.DataFrame()
+
+
+def _distinct(col):
+    if combined_selected.empty or col not in combined_selected.columns:
+        return set()
+    return {
+        str(v).strip() for v in combined_selected[col].dropna()
+        if str(v).strip() and str(v).strip().lower() != "nan"
+    }
+
+
+# Quoting requires a consistent selection. Mweight is grade-specific (Area(IN))
+# and basis-weight-specific, and neither grades nor basis weights are
+# interchangeable on the machine — they run at different speeds and, for rolls,
+# the job-level converting math reads Caliper / ProductGroupID off the first
+# selected row. So a pick spanning either has no single Mweight and no
+# meaningful converting cost. Searching across both is allowed; quoting is not.
+# Both grade keys are checked: a frame missing GradeID would otherwise drop out
+# of the count and let a mixed-grade selection through as if it were uniform.
+_grade_names_sel = sorted(_distinct("GradeName"))
+selection_mixed_grades = max(len(_distinct("GradeID")), len(_grade_names_sel)) > 1
+
+_basis_wts_sel = (
+    pd.to_numeric(combined_selected["BasisWt"], errors="coerce").dropna().unique()
+    if (not combined_selected.empty and "BasisWt" in combined_selected.columns)
+    else []
+)
+selection_mixed_basis_wts = len(_basis_wts_sel) > 1
+
+# Either kind of mix suppresses Mweight and the job-level converting cost.
+selection_inconsistent = selection_mixed_grades or selection_mixed_basis_wts
+
 if sheet_width and sheet_length:
-    # Combine all selected rows to get BasisWt and GradeID
-    combined_selected = pd.concat([selected_exact, selected_alt_sheets, selected_alt_rolls], ignore_index=True) if (
-        not selected_exact.empty or not selected_alt_sheets.empty or not selected_alt_rolls.empty
-    ) else pd.DataFrame()
-    
     if not combined_selected.empty:
-        # Check if all selected rows have the same BasisWt
-        if "BasisWt" in combined_selected.columns:
-            unique_basis_wts = combined_selected["BasisWt"].dropna().unique()
-            if len(unique_basis_wts) > 1:
-                mweight_error = "Mweight cannot be calculated when non-uniform basis weights are selected"
-            elif len(unique_basis_wts) == 1:
-                # Get BasisWt and BasisWtUOM from the first selected row
-                selected_basis_wt = float(unique_basis_wts[0])
-                basis_uom = "LB"
-                grade_name = combined_selected.iloc[0].get("GradeName", "Unknown")
-                
-                if "BasisWtUOM" in combined_selected.columns:
-                    uom_val = combined_selected.iloc[0].get("BasisWtUOM")
-                    if pd.notna(uom_val):
-                        basis_uom = str(uom_val).strip().upper()
-                
-                # Look up Area(IN) and GSM from Grade table based on GradeID
-                area_in = None
-                gsm_factor = None
-                if grade_df is not None and "GradeID" in combined_selected.columns:
-                    grade_id = str(combined_selected.iloc[0].get("GradeID", "")).strip()
-                    if grade_id:
-                        grade_match = grade_df[grade_df["GradeID"] == grade_id]
-                        if not grade_match.empty:
-                            area_in = float(grade_match.iloc[0].get("Area(IN)", 0) or 0)
-                            gsm_val = grade_match.iloc[0].get("GSM")
-                            if pd.notna(gsm_val) and float(gsm_val) > 0:
-                                gsm_factor = float(gsm_val)
-                
-                # Convert basis weight to LBS if needed
-                if selected_basis_wt and selected_basis_wt > 0:
-                    if basis_uom == "GSM":
-                        if gsm_factor and gsm_factor > 0:
-                            basis_wt_lbs = selected_basis_wt / gsm_factor
-                        else:
-                            mweight_error = f"No GSM_Factor found for grade {grade_name}"
-                            basis_wt_lbs = None
+        if selection_inconsistent:
+            # Left unset: reported once below, together with the suppressed
+            # converting cost, rather than as two overlapping messages.
+            pass
+        elif len(_basis_wts_sel) == 1:
+            # Get BasisWt and BasisWtUOM from the first selected row
+            selected_basis_wt = float(_basis_wts_sel[0])
+            basis_uom = "LB"
+            grade_name = combined_selected.iloc[0].get("GradeName", "Unknown")
+
+            if "BasisWtUOM" in combined_selected.columns:
+                uom_val = combined_selected.iloc[0].get("BasisWtUOM")
+                if pd.notna(uom_val):
+                    basis_uom = str(uom_val).strip().upper()
+
+            # Look up Area(IN) and GSM from Grade table based on GradeID
+            area_in = None
+            gsm_factor = None
+            if grade_df is not None and "GradeID" in combined_selected.columns:
+                grade_id = str(combined_selected.iloc[0].get("GradeID", "")).strip()
+                if grade_id:
+                    grade_match = grade_df[grade_df["GradeID"] == grade_id]
+                    if not grade_match.empty:
+                        area_in = float(grade_match.iloc[0].get("Area(IN)", 0) or 0)
+                        gsm_val = grade_match.iloc[0].get("GSM")
+                        if pd.notna(gsm_val) and float(gsm_val) > 0:
+                            gsm_factor = float(gsm_val)
+
+            # Convert basis weight to LBS if needed
+            if selected_basis_wt and selected_basis_wt > 0:
+                if basis_uom == "GSM":
+                    if gsm_factor and gsm_factor > 0:
+                        basis_wt_lbs = selected_basis_wt / gsm_factor
                     else:
-                        basis_wt_lbs = selected_basis_wt
-                    
-                    # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt in LBS * 2
-                    if basis_wt_lbs and area_in and area_in > 0:
-                        mweight = round(((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2)
+                        mweight_error = f"No GSM_Factor found for grade {grade_name}"
+                        basis_wt_lbs = None
+                else:
+                    basis_wt_lbs = selected_basis_wt
+
+                # Calculate Mweight: ((Width * Length) / Area(IN)) * BasisWt in LBS * 2
+                if basis_wt_lbs and area_in and area_in > 0:
+                    mweight = round(((float(sheet_width) * float(sheet_length)) / area_in) * basis_wt_lbs * 2)
 
 # Summary metrics row (always visible – Option A)
 # Calculate Cost Per M Sheets: Cost Per CWT * .01 * Mweight (using rounded Mweight)
@@ -2510,6 +2592,11 @@ if (
     (not selected_alt_sheets.empty or not selected_alt_rolls.empty)
     and order_quantity_param
     and order_quantity_param > 0
+    # A selection spanning grades or basis weights has no single machine setup,
+    # product group, running speed or Mweight, so the job-level converting math
+    # would silently take them from whichever row sorted first. Quote each
+    # grade / basis weight separately instead.
+    and not selection_inconsistent
 ):
     equip_type_sel = "Sheeter"
 
@@ -2692,6 +2779,21 @@ with c10:
 
 if mweight_error:
     st.error(mweight_error)
+
+if selection_mixed_grades:
+    st.error(
+        "**Multiple grades selected"
+        + (f" ({', '.join(_grade_names_sel)})" if _grade_names_sel else "")
+        + "** — Mweight, converting cost and Order Qty Cost are not calculated. "
+        "Grades are not interchangeable; quote each one separately and combine the results."
+    )
+elif selection_mixed_basis_wts:
+    st.error(
+        "**Non-uniform basis weights selected"
+        + (f" ({', '.join(f'{b:g}' for b in sorted(_basis_wts_sel))})" if len(_basis_wts_sel) else "")
+        + "** — Mweight, converting cost and Order Qty Cost are not calculated. "
+        "Basis weights run at different speeds; quote each one separately and combine the results."
+    )
 
 # --- Order Qty Cost breakdown (base rate, upcharge, minimum, freight) ---
 if conv_breakdown is not None and order_qty_cost_cwt is not None:
