@@ -223,6 +223,44 @@ def load_po_detail():
 
 
 # =========================================================
+# CALIPER TOLERANCE
+# =========================================================
+CALIPER_TOLERANCE_PCT = 0.05
+
+
+def caliper_range(calipers):
+    """Widen the selected caliper(s) into a search band.
+
+    A caliper is a target, not an exact spec, so anything within
+    CALIPER_TOLERANCE_PCT of it is a usable substitute. With several
+    calipers selected the band runs from 5% under the lowest to 5% over
+    the highest. Returns (low, high), or None when nothing usable was
+    selected (caller should then skip the caliper filter entirely).
+    """
+    vals = []
+    for c in calipers or []:
+        try:
+            v = float(c)
+        except (ValueError, TypeError):
+            continue
+        if v > 0:
+            vals.append(v)
+    if not vals:
+        return None
+    return min(vals) * (1 - CALIPER_TOLERANCE_PCT), max(vals) * (1 + CALIPER_TOLERANCE_PCT)
+
+
+def _caliper_param_text(calipers):
+    """Caliper line for the quote PDF / on-screen search summary."""
+    band = caliper_range(calipers)
+    if not band:
+        return "All"
+    return "{} (searched {:.4f} - {:.4f})".format(
+        ", ".join(str(c) for c in calipers), band[0], band[1]
+    )
+
+
+# =========================================================
 # ORDER SIZE ADJUSTMENT LOOKUP
 # =========================================================
 def get_order_size_pct(adj_df, process, description, order_qty):
@@ -557,7 +595,7 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Product Group:", str(search_params.get("product_group") or "All")],
         ["Grade:", ", ".join(str(g) for g in grade_list) if grade_list else "All"],
         ["Basis Weight:", ", ".join(str(b) for b in basis_wt_list) if basis_wt_list else "All"],
-        ["Caliper:", ", ".join(str(c) for c in caliper_list) if caliper_list else "All"],
+        ["Caliper:", _caliper_param_text(caliper_list)],
         ["Sheet Width:", f"{search_params.get('sheet_width_input')}\"" if search_params.get("sheet_width_input") else "Not specified"],
         ["Sheet Length:", f"{search_params.get('sheet_length_input')}\"" if search_params.get("sheet_length_input") else "Not specified"],
         ["Max Waste %:", f"{search_params.get('max_waste_pct')}%" if search_params.get("max_waste_pct") is not None else "Not specified"],
@@ -876,7 +914,19 @@ with st.container():
         if "Caliper" in df.columns:
             caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
             cal_opts = [f"{x:.4f}" for x in sorted(caliper_values)]
-            calipers = st.multiselect("Caliper(s)", cal_opts, placeholder="All calipers (leave empty)", key=f"fld_calipers_{rc}")
+            calipers = st.multiselect(
+                "Caliper(s)",
+                cal_opts,
+                placeholder="All calipers (leave empty)",
+                help=(
+                    f"Search runs on a +/-{CALIPER_TOLERANCE_PCT:.0%} band. With multiple "
+                    "calipers selected the band spans from 5% below the lowest to 5% above the highest."
+                ),
+                key=f"fld_calipers_{rc}",
+            )
+            _cal_band = caliper_range(calipers)
+            if _cal_band:
+                st.caption(f"Searching calipers {_cal_band[0]:.4f} – {_cal_band[1]:.4f}")
         else:
             calipers = []
 
@@ -1412,11 +1462,13 @@ def run_search(params):
         filtered = filtered[filtered["BasisWt"].isin(basis_weights)]
 
     if "Caliper" in filtered.columns and calipers:
-        # Convert caliper strings back to floats for comparison
-        caliper_floats = [float(c) for c in calipers]
-        filtered = filtered[
-            pd.to_numeric(filtered["Caliper"], errors="coerce").round(4).isin(caliper_floats)
-        ]
+        # Match a +/-5% band around the entered caliper(s) rather than exact values
+        cal_band = caliper_range(calipers)
+        if cal_band:
+            cal_lo, cal_hi = cal_band
+            filtered = filtered[
+                pd.to_numeric(filtered["Caliper"], errors="coerce").between(cal_lo, cal_hi)
+            ]
 
     exact_matches = pd.DataFrame()
     alternative_rolls = pd.DataFrame()
@@ -3005,10 +3057,9 @@ if reserve_inv_df is not None and not reserve_inv_df.empty and requested_width i
     if "BasisWt" in ri.columns and sp.get("basis_weights"):
         ri = ri[ri["BasisWt"].isin(sp["basis_weights"])]
 
-    sp_cal = sp.get("calipers")
+    sp_cal = caliper_range(sp.get("calipers"))
     if "Caliper" in ri.columns and sp_cal:
-        caliper_floats = [float(c) for c in sp_cal]
-        ri = ri[pd.to_numeric(ri["Caliper"], errors="coerce").round(4).isin(caliper_floats)]
+        ri = ri[pd.to_numeric(ri["Caliper"], errors="coerce").between(sp_cal[0], sp_cal[1])]
 
     # --- Match sheets: exact + alternative (by area waste) ---
     ri_sheets = pd.DataFrame()
