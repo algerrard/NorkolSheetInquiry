@@ -96,6 +96,33 @@ EXCLUDED_PRODUCT_CATEGORIES = {"INDUSTRIAL PKG SUPPLIES", "INDUSTRIAL PACKAGING"
 # =========================================================
 # DATA LOADING
 # =========================================================
+# The date of receipt drives roll age, but the extract has not been consistent about
+# what it calls that column. Match on a squashed (lowercase, no spaces/underscores)
+# name and normalize whichever spelling is present to a single "RcvDate".
+RCV_DATE_CANDIDATES = {
+    "rcvdate", "rcvdt", "receivedate", "receiveddate",
+    "datereceived", "recdate", "receiptdate",
+}
+
+
+def normalize_rcv_date(frame):
+    """Rename the receipt-date column to RcvDate and coerce it to datetime."""
+    if frame is None or frame.empty:
+        return frame
+    if "RcvDate" not in frame.columns:
+        match = next(
+            (c for c in frame.columns
+             if str(c).strip().lower().replace(" ", "").replace("_", "")
+             in RCV_DATE_CANDIDATES),
+            None,
+        )
+        if match is None:
+            return frame
+        frame = frame.rename(columns={match: "RcvDate"})
+    frame["RcvDate"] = pd.to_datetime(frame["RcvDate"], errors="coerce")
+    return frame
+
+
 @st.cache_data(ttl=3600)
 def load_inventory_data():
     try:
@@ -103,13 +130,15 @@ def load_inventory_data():
         blob_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=BLOB_NAME)
         csv_content = blob_client.download_blob().readall().decode("utf-8")
         df = pd.read_csv(StringIO(csv_content), on_bad_lines="skip", encoding="utf-8")
+        # Every other loader strips header whitespace; this one did not, so a header
+        # like " RcvDate" silently failed every `col in df.columns` check.
+        df.columns = df.columns.str.strip()
         # 🔧 FIX: Ensure BasisWt is numeric
         if "BasisWt" in df.columns:
             df["BasisWt"] = pd.to_numeric(df["BasisWt"], errors="coerce")
 
         # Date of receipt — drives roll/skid age in days in the per-roll detail selectors
-        if "RcvDate" in df.columns:
-            df["RcvDate"] = pd.to_datetime(df["RcvDate"], errors="coerce")
+        df = normalize_rcv_date(df)
         return df, datetime.now()
     except Exception as e:
         st.error(f"Error loading inventory: {str(e)}")
@@ -199,8 +228,7 @@ def load_reserve_inventory():
             ri_df["ReserveDate"] = pd.to_datetime(ri_df["ReserveDate"], errors="coerce")
         # Receipt date drives roll age; reserved stock can be folded into the search pool
         # so it needs the same treatment as main inventory.
-        if "RcvDate" in ri_df.columns:
-            ri_df["RcvDate"] = pd.to_datetime(ri_df["RcvDate"], errors="coerce")
+        ri_df = normalize_rcv_date(ri_df)
         return ri_df
     except Exception as e:
         st.warning(f"Could not load reserve inventory: {str(e)}")
@@ -2128,6 +2156,19 @@ if not alternative_sheets.empty:
                     key=_editor_key_sh,
                 )
 
+                # Say why Age is missing rather than just omitting the column, and name
+                # the date-like columns that ARE present so the extract can be fixed.
+                if "Age" not in editor_df.columns:
+                    _date_like = [
+                        c for c in detail_rows.columns
+                        if any(t in str(c).lower() for t in ("date", "dt", "rcv", "recv"))
+                    ]
+                    st.caption(
+                        "Age (days) unavailable — no receipt-date column in the inventory "
+                        "extract. Date-like columns present: "
+                        + (", ".join(map(str, _date_like)) if _date_like else "none")
+                    )
+
                 visible_ids = set(_vid_sh)
                 selected_now = set(edited.loc[edited["Selected"] == True, "_detail_id"].astype(int).tolist())
                 st.session_state.sel_alt_sheets_detail = (
@@ -2382,6 +2423,19 @@ if not alternative_rolls.empty:
                     use_container_width=True,
                     key=_editor_key_rl,
                 )
+
+                # Say why Age is missing rather than just omitting the column, and name
+                # the date-like columns that ARE present so the extract can be fixed.
+                if "Age" not in editor_df.columns:
+                    _date_like = [
+                        c for c in detail_rows.columns
+                        if any(t in str(c).lower() for t in ("date", "dt", "rcv", "recv"))
+                    ]
+                    st.caption(
+                        "Age (days) unavailable — no receipt-date column in the inventory "
+                        "extract. Date-like columns present: "
+                        + (", ".join(map(str, _date_like)) if _date_like else "none")
+                    )
 
                 visible_ids = set(_vid_rl)
                 selected_now = set(edited.loc[edited["Selected"] == True, "_detail_id"].astype(int).tolist())
