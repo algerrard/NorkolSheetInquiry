@@ -82,8 +82,9 @@ ORDER_SIZE_ADJ_BLOB = "Order Size Adjustments.csv"
 PO_DETAIL_BLOB = "SODetail"
 RESERVE_INV_BLOB = "Inventory/ReserveInventory.csv"
 
-# Reserved rolls/sheets must be aged past this many days before they can be pulled
-# into a quote scenario (also drives the read-only Reserved Inventory panel).
+# Age cutoff for the read-only Reserved Inventory panel, which is a "what has been
+# sitting reserved" list. The quotable pool behind the 🔒 Include reserved inventory
+# checkbox is deliberately NOT age-limited.
 RESERVED_MIN_AGE_DAYS = 30
 
 # Non-paper stock (plastic bags, tape, stretch wrap, barrier film, pouches) rides along
@@ -105,6 +106,10 @@ def load_inventory_data():
         # 🔧 FIX: Ensure BasisWt is numeric
         if "BasisWt" in df.columns:
             df["BasisWt"] = pd.to_numeric(df["BasisWt"], errors="coerce")
+
+        # Date of receipt — drives roll/skid age in days in the per-roll detail selectors
+        if "RcvDate" in df.columns:
+            df["RcvDate"] = pd.to_datetime(df["RcvDate"], errors="coerce")
         return df, datetime.now()
     except Exception as e:
         st.error(f"Error loading inventory: {str(e)}")
@@ -192,6 +197,10 @@ def load_reserve_inventory():
                 ri_df[col] = pd.to_numeric(ri_df[col], errors="coerce")
         if "ReserveDate" in ri_df.columns:
             ri_df["ReserveDate"] = pd.to_datetime(ri_df["ReserveDate"], errors="coerce")
+        # Receipt date drives roll age; reserved stock can be folded into the search pool
+        # so it needs the same treatment as main inventory.
+        if "RcvDate" in ri_df.columns:
+            ri_df["RcvDate"] = pd.to_datetime(ri_df["RcvDate"], errors="coerce")
         return ri_df
     except Exception as e:
         st.warning(f"Could not load reserve inventory: {str(e)}")
@@ -774,6 +783,14 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
     freight_total = summary_data.get('freight_total')
     freight_cwt = summary_data.get('freight_cwt')
     freight_per_m = summary_data.get('freight_per_m')
+    est_msf = summary_data.get('est_msf')
+    blended_msf = summary_data.get('blended_msf')
+    order_qty_cost_msf = summary_data.get('order_qty_cost_msf')
+    conv_cwt = summary_data.get('conv_cwt')
+    margin_pct = summary_data.get('margin_pct')
+    sale_cwt = summary_data.get('sale_cwt')
+    sale_per_m = summary_data.get('sale_per_m')
+    sale_msf = summary_data.get('sale_msf')
 
     summary_table_data = [
         ["Exact Qty Selected:", f"{exact_lbs:,.0f} lbs"],
@@ -782,7 +799,9 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
         ["Mweight:", f"{mweight:,.0f} lbs" if mweight else "—"],
         ["Blended Cost / CWT:", f"${blended_cwt:,.2f}"],
         ["Cost Per M Sheets:", f"${cost_per_m:,.2f}" if cost_per_m else "—"],
+        ["Blended Cost / MSF:", f"${blended_msf:,.2f}" if blended_msf else "—"],
         ["Estimated Sheets:", f"{est_sheets:,.0f}" if est_sheets else "—"],
+        ["Estimated MSF:", f"{est_msf:,.1f}" if est_msf else "—"],
         ["Order Qty:", f"{order_qty:,.0f} lbs" if order_qty else "—"],
     ]
     if freight_total:
@@ -792,10 +811,19 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
             ["Freight / M Sheets:", f"${freight_per_m:,.2f}" if freight_per_m else "—"],
         ])
     summary_table_data.extend([
+        ["Converting Cost / CWT:", f"${conv_cwt:,.2f}" if conv_cwt is not None else "—"],
         ["Order Qty Cost / CWT:", f"${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "—"],
         ["Order Qty Cost / M Sheets:", f"${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "—"],
+        ["Order Qty Cost / MSF:", f"${order_qty_cost_msf:,.2f}" if order_qty_cost_msf is not None else "—"],
     ])
-    
+    if sale_cwt is not None:
+        summary_table_data.extend([
+            ["Margin %:", f"{margin_pct:,.2f}%"],
+            ["Customer Sale Price / CWT:", f"${sale_cwt:,.2f}"],
+            ["Customer Sale Price / M Sheets:", f"${sale_per_m:,.2f}" if sale_per_m is not None else "—"],
+            ["Customer Sale Price / MSF:", f"${sale_msf:,.2f}" if sale_msf is not None else "—"],
+        ])
+
     summary_table = Table(summary_table_data, colWidths=[2*inch, 2*inch])
     summary_table.setStyle(TableStyle([
         ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
@@ -1062,7 +1090,7 @@ with st.container():
         )
 
         include_reserved = st.checkbox(
-            f"🔒 Include reserved inventory (reserved > {RESERVED_MIN_AGE_DAYS} days)",
+            "🔒 Include reserved inventory",
             help=(
                 "Scenario mode: allows stock already reserved against a sales order to be "
                 "quoted. Reserved rolls/sheets are flagged with 🔒 and their customer in the "
@@ -1421,15 +1449,13 @@ def run_search(params):
 
     filtered = df.copy()
 
-    # Scenario mode: fold aged reserved stock into the candidate pool. The reserve blob
-    # carries the same schema as main inventory (plus the Res* columns) and the two are
-    # disjoint, so a plain concat cannot double-count a roll/sheet. When the option is off
-    # we add no columns at all, leaving the normal search path untouched.
+    # Scenario mode: fold reserved stock into the candidate pool, regardless of how long
+    # it has been on reservation. The reserve blob carries the same schema as main
+    # inventory (plus the Res* columns) and the two are disjoint, so a plain concat cannot
+    # double-count a roll/sheet. When the option is off we add no columns at all, leaving
+    # the normal search path untouched.
     if include_reserved and reserve_inv_df is not None and not reserve_inv_df.empty:
         ri_pool = reserve_inv_df.copy()
-        if "ReserveDate" in ri_pool.columns:
-            cutoff = pd.Timestamp.now() - pd.Timedelta(days=RESERVED_MIN_AGE_DAYS)
-            ri_pool = ri_pool[ri_pool["ReserveDate"] <= cutoff]
         if not ri_pool.empty:
             filtered["IsReserved"] = False
             ri_pool["IsReserved"] = True
@@ -2025,6 +2051,15 @@ if not alternative_sheets.empty:
                         ) * 100.0
                         detail_rows["CostPerCWT"] = detail_rows["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
 
+                # Age of the roll/skid in days, measured from date of receipt. Normalized
+                # to midnight so the number does not drift with time of day; nullable
+                # Int64 so a missing RcvDate renders blank rather than tripping the format.
+                if "RcvDate" in detail_rows.columns:
+                    detail_rows["Age"] = (
+                        pd.Timestamp.now().normalize()
+                        - pd.to_datetime(detail_rows["RcvDate"], errors="coerce")
+                    ).dt.days.astype("Int64")
+
                 detail_rows["Selected"] = detail_rows["_detail_id"].astype(int).isin(
                     st.session_state.sel_alt_sheets_detail
                 )
@@ -2032,7 +2067,7 @@ if not alternative_sheets.empty:
                 inv_display_cols = [
                     "Selected", "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
                     "SheetWidth", "SheetLength", "Condition", "Mill", "Brand",
-                    "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
+                    "Warehouse", "Age", "QtyOnHand", "Units", "CostPerCWT",
                 ]
 
                 # Per-row reservation detail, only when reserved stock is in the pool
@@ -2059,6 +2094,12 @@ if not alternative_sheets.empty:
                     col_config["Caliper"] = st.column_config.NumberColumn("Caliper", format="%.4f")
                 if "CostPerCWT" in editor_df.columns:
                     col_config["CostPerCWT"] = st.column_config.NumberColumn("Cost/CWT", format="$%.2f")
+                if "Age" in editor_df.columns:
+                    col_config["Age"] = st.column_config.NumberColumn(
+                        "Age (days)",
+                        format="%d",
+                        help="Days since date of receipt (RcvDate)",
+                    )
 
                 # Key changes when the visible-row set changes, so stale edits
                 # from a different aggregate selection can't bleed onto new rows.
@@ -2264,6 +2305,15 @@ if not alternative_rolls.empty:
                         ) * 100.0
                         detail_rows["CostPerCWT"] = detail_rows["CostPerCWT"].replace([np.inf, -np.inf], np.nan)
 
+                # Age of the roll/skid in days, measured from date of receipt. Normalized
+                # to midnight so the number does not drift with time of day; nullable
+                # Int64 so a missing RcvDate renders blank rather than tripping the format.
+                if "RcvDate" in detail_rows.columns:
+                    detail_rows["Age"] = (
+                        pd.Timestamp.now().normalize()
+                        - pd.to_datetime(detail_rows["RcvDate"], errors="coerce")
+                    ).dt.days.astype("Int64")
+
                 detail_rows["Selected"] = detail_rows["_detail_id"].astype(int).isin(
                     st.session_state.sel_alt_rolls_detail
                 )
@@ -2271,7 +2321,7 @@ if not alternative_rolls.empty:
                 inv_display_cols = [
                     "Selected", "COID", "LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
                     "Roll_Width", "Diameter", "Condition", "Mill", "Brand",
-                    "Warehouse", "QtyOnHand", "Units", "CostPerCWT",
+                    "Warehouse", "Age", "QtyOnHand", "Units", "CostPerCWT",
                 ]
 
                 # Per-roll reservation detail, only when reserved stock is in the pool
@@ -2299,6 +2349,12 @@ if not alternative_rolls.empty:
                     col_config["Roll_Width"] = st.column_config.NumberColumn("Roll_Width", format="%.2f")
                 if "Diameter" in editor_df.columns:
                     col_config["Diameter"] = st.column_config.NumberColumn("Diameter", format="%.0f")
+                if "Age" in editor_df.columns:
+                    col_config["Age"] = st.column_config.NumberColumn(
+                        "Age (days)",
+                        format="%d",
+                        help="Days since date of receipt (RcvDate)",
+                    )
                 if "CostPerCWT" in editor_df.columns:
                     col_config["CostPerCWT"] = st.column_config.NumberColumn("Cost/CWT", format="$%.2f")
 
@@ -2829,6 +2885,103 @@ with c10:
         help=per_m_help,
     )
 
+# --- MSF (thousand square feet) ------------------------------------------
+# One thousand sheets covers exactly (w x l / 144) MSF, so $/MSF is $/M-sheets
+# divided by the square footage of a single sheet. Depends only on the requested
+# sheet size, so it resolves even before a selection fixes Mweight.
+sqft_per_sheet = None
+try:
+    _w_msf = float(str(sheet_width).strip()) if sheet_width else None
+    _l_msf = float(str(sheet_length).strip()) if sheet_length else None
+    if _w_msf and _l_msf and _w_msf > 0 and _l_msf > 0:
+        sqft_per_sheet = (_w_msf * _l_msf) / 144.0
+except (TypeError, ValueError):
+    sqft_per_sheet = None
+
+est_msf = (est_sheets * sqft_per_sheet / 1000.0) if (est_sheets and sqft_per_sheet) else None
+blended_cost_msf = (cost_per_m / sqft_per_sheet) if (cost_per_m and sqft_per_sheet) else None
+order_qty_cost_msf = (
+    order_qty_cost_per_m / sqft_per_sheet
+    if (order_qty_cost_per_m is not None and sqft_per_sheet) else None
+)
+freight_msf = (freight_per_m / sqft_per_sheet) if (freight_per_m and sqft_per_sheet) else 0.0
+
+n1, n2, n3, _ = st.columns([1, 1, 1, 2])
+with n1:
+    st.metric(
+        "Estimated MSF",
+        f"{est_msf:,.1f}" if est_msf is not None else "—",
+        help=f"{sqft_per_sheet:,.3f} sq ft per sheet" if sqft_per_sheet else None,
+    )
+with n2:
+    st.metric(
+        "Blended Cost",
+        f"${blended_cost_msf:,.2f} / MSF" if blended_cost_msf is not None else "— / MSF",
+    )
+with n3:
+    msf_help = (
+        f"Includes ${freight_msf:,.2f}/MSF freight (${freight_cost:,.2f} total)"
+        if freight_msf > 0 else None
+    )
+    st.metric(
+        "Order Qty Cost",
+        f"${order_qty_cost_msf:,.2f} / MSF" if order_qty_cost_msf is not None else "— / MSF",
+        help=msf_help,
+    )
+
+# --- Customer sale price (Order Qty Cost grossed up to a target margin) --
+# Deliberately outside the search form: a rep re-prices by changing the margin, and
+# should not have to re-run the whole search to see the new number. The "fld_" prefix
+# is what the Reset button keys off, so margin clears with the rest of the inputs.
+st.markdown("**Customer Sale Price**")
+mg_col, sale_cwt_col, sale_m_col, sale_msf_col = st.columns([1.8, 1.1, 1.1, 1.1])
+
+with mg_col:
+    # Capped below 100 so the divisor can never reach zero.
+    margin_pct = st.number_input(
+        "Margin % for Sale Price Calculation",
+        min_value=0.0,
+        max_value=99.0,
+        value=0.0,
+        step=1.0,
+        format="%.2f",
+        help=(
+            "Gross margin on the sale price:  Sale = Order Qty Cost / (1 - Margin% / 100).\n\n"
+            "Order Qty Cost already includes converting, the order-qty upcharge, "
+            "any machine minimum, and freight."
+        ),
+        key="fld_margin_pct",
+    )
+
+_margin_divisor = 1.0 - (margin_pct / 100.0)
+sale_cwt = order_qty_cost_cwt / _margin_divisor if order_qty_cost_cwt is not None else None
+sale_per_m = order_qty_cost_per_m / _margin_divisor if order_qty_cost_per_m is not None else None
+sale_msf = order_qty_cost_msf / _margin_divisor if order_qty_cost_msf is not None else None
+
+with sale_cwt_col:
+    st.metric(
+        "Customer Sale Price",
+        f"${sale_cwt:,.2f} / CWT" if sale_cwt is not None else "— / CWT",
+    )
+with sale_m_col:
+    st.metric(
+        "Customer Sale Price",
+        f"${sale_per_m:,.2f} / M Sheets" if sale_per_m is not None else "— / M Sheets",
+    )
+with sale_msf_col:
+    st.metric(
+        "Customer Sale Price",
+        f"${sale_msf:,.2f} / MSF" if sale_msf is not None else "— / MSF",
+    )
+
+# Margin and markup are easy to conflate; show the markup this margin implies so a
+# rep can see immediately whether they priced the number they meant to.
+if margin_pct > 0:
+    st.caption(
+        f"{margin_pct:,.2f}% margin on the sale price = "
+        f"{(margin_pct / (100.0 - margin_pct)) * 100:,.2f}% markup on cost."
+    )
+
 if mweight_error:
     st.error(mweight_error)
 
@@ -2945,6 +3098,20 @@ if not export_df.empty:
         "order_qty": order_quantity_param,
         "order_qty_cost_cwt": order_qty_cost_cwt,
         "order_qty_cost_per_m": order_qty_cost_per_m,
+        "est_msf": est_msf,
+        "blended_msf": blended_cost_msf,
+        "order_qty_cost_msf": order_qty_cost_msf,
+        # Converting cost actually charged: order-adjusted where an order qty resolved,
+        # otherwise the raw blended rate off the selected lots.
+        "conv_cwt": final_conv_cwt if final_conv_cwt is not None else (
+            blended_conv_cwt if blended_conv_cwt > 0 else None
+        ),
+        # Sale price only prints when a margin was actually entered — at 0% it would
+        # just restate Order Qty Cost under a customer-facing label.
+        "margin_pct": margin_pct if margin_pct > 0 else None,
+        "sale_cwt": sale_cwt if margin_pct > 0 else None,
+        "sale_per_m": sale_per_m if margin_pct > 0 else None,
+        "sale_msf": sale_msf if margin_pct > 0 else None,
         "freight_total": freight_cost if freight_cost and freight_cost > 0 else None,
         "freight_cwt": freight_cwt if freight_cwt > 0 else None,
         "freight_per_m": freight_per_m if freight_per_m > 0 else None,
@@ -2961,7 +3128,9 @@ if not export_df.empty:
         f"Mweight,{mweight:,.0f} lbs" if mweight else "Mweight,—",
         f"Blended Cost / CWT,${blended_cost_cwt:,.2f}",
         f"Cost Per M Sheets,${cost_per_m:,.2f}" if cost_per_m is not None else "Cost Per M Sheets,—",
+        f"Blended Cost / MSF,${blended_cost_msf:,.2f}" if blended_cost_msf is not None else "Blended Cost / MSF,—",
         f"Estimated Sheets,{est_sheets:,.0f}" if est_sheets is not None else "Estimated Sheets,—",
+        f"Estimated MSF,{est_msf:,.1f}" if est_msf is not None else "Estimated MSF,—",
         (
             f"Order Qty,{_sheets_requested:,} sheets"
             + (f" (≈ {order_quantity_param:,.0f} lbs)" if order_quantity_param else "")
@@ -2976,9 +3145,18 @@ if not export_df.empty:
             f"Freight / M Sheets,${freight_per_m:,.2f}",
         ])
     footer_rows.extend([
+        f"Converting Cost / CWT,${summary_data['conv_cwt']:,.2f}" if summary_data.get("conv_cwt") is not None else "Converting Cost / CWT,—",
         f"Order Qty Cost / CWT,${order_qty_cost_cwt:,.2f}" if order_qty_cost_cwt is not None else "Order Qty Cost / CWT,—",
         f"Order Qty Cost / M Sheets,${order_qty_cost_per_m:,.2f}" if order_qty_cost_per_m is not None else "Order Qty Cost / M Sheets,—",
+        f"Order Qty Cost / MSF,${order_qty_cost_msf:,.2f}" if order_qty_cost_msf is not None else "Order Qty Cost / MSF,—",
     ])
+    if margin_pct > 0:
+        footer_rows.extend([
+            f"Margin %,{margin_pct:,.2f}%",
+            f"Customer Sale Price / CWT,${sale_cwt:,.2f}" if sale_cwt is not None else "Customer Sale Price / CWT,—",
+            f"Customer Sale Price / M Sheets,${sale_per_m:,.2f}" if sale_per_m is not None else "Customer Sale Price / M Sheets,—",
+            f"Customer Sale Price / MSF,${sale_msf:,.2f}" if sale_msf is not None else "Customer Sale Price / MSF,—",
+        ])
     # Append selected per-roll detail to the CSV (after the aggregated rows, before the summary)
     detail_section = ""
     detail_cols_sheets = ["LotNo", "RollNo", "GradeName", "BasisWt", "Caliper",
