@@ -78,6 +78,7 @@ BLOB_NAME = "Inventory/Norkol_Inventory"
 PAPER_INFO_BLOB = "PaperInformation.csv"
 MACHINE_INFO_BLOB = "MachineInfo.csv"
 GRADE_TABLE_BLOB = "Grade"
+ADMIN_CONTACT = "Please contact the app administrator to update the reference table."
 ORDER_SIZE_ADJ_BLOB = "Order Size Adjustments.csv"
 PO_DETAIL_BLOB = "SODetail"
 RESERVE_INV_BLOB = "Inventory/ReserveInventory.csv"
@@ -451,6 +452,7 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 
         # Lookup paper info (SHT_RunAdjust, NumShtrRolls) via ProductGroupID from Grade table
         paper_row = None
+        prod_group_id = ""
         if grade_row is not None and paper_info_df is not None:
             prod_group_id = str(grade_row["ProductGroupID"]).strip()
             pr = paper_info_df[
@@ -466,8 +468,15 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             machine_row = mr.iloc[0] if len(mr) else None
 
         if grade_row is None or paper_row is None or machine_row is None:
+            if grade_row is None:
+                msg = f"GradeID '{grade_id}' is missing from the Grade table. {ADMIN_CONTACT}"
+            elif paper_row is None:
+                msg = f"ProductGroupID '{prod_group_id}' is missing from PaperInformation. {ADMIN_CONTACT}"
+            else:
+                msg = f"EquipType '{equip_type}' is missing from MachineInfo. {ADMIN_CONTACT}"
             return pd.Series(
-                {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
+                {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
+                 "ConvError": msg}
             )
 
         # Inputs
@@ -517,15 +526,28 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
         if num_shtr_rolls < 1:
             num_shtr_rolls = 1
 
-        # SHT_RunAdjust: per-grade sheeting efficiency multiplier (default 1.0 if missing)
+        # SHT_RunAdjust: per-grade sheeting efficiency multiplier.
+        # No silent 1.0 fallback. A genuine 1.0 is written explicitly in the table
+        # for every uncalibrated grade, so a blank can only mean a missing row --
+        # defaulting would be indistinguishable from a real value and misprice the job.
         sht_run_adjust_val = paper_row.get("SHT_RunAdjust", None)
         if sht_run_adjust_val is None or pd.isna(sht_run_adjust_val):
-            sht_run_adjust = 1.0
-        else:
-            try:
-                sht_run_adjust = float(sht_run_adjust_val)
-            except (ValueError, TypeError):
-                sht_run_adjust = 1.0
+            return pd.Series(
+                {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
+                 "ConvError": f"SHT_RunAdjust is missing for ProductGroupID "
+                              f"'{prod_group_id}' in PaperInformation. {ADMIN_CONTACT}"}
+            )
+        try:
+            sht_run_adjust = float(sht_run_adjust_val)
+        except (ValueError, TypeError):
+            sht_run_adjust = None
+        if sht_run_adjust is None or sht_run_adjust <= 0:
+            return pd.Series(
+                {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
+                 "ConvError": f"SHT_RunAdjust '{sht_run_adjust_val}' is not a positive number "
+                              f"for ProductGroupID '{prod_group_id}' in PaperInformation. "
+                              f"{ADMIN_CONTACT}"}
+            )
 
         # Basis weight to LB if needed (GSM from Grade table)
         if basis_uom == "GSM":
@@ -535,8 +557,15 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             basis_lb = basis_wt
 
         if not area_in or not avg_speed or requested_width is None:
+            if not area_in:
+                msg = f"Area(IN) is missing or zero for GradeID '{grade_id}' in the Grade table. {ADMIN_CONTACT}"
+            elif not avg_speed:
+                msg = f"AvgSpeed(FPM) is missing or zero for '{equip_type}' in MachineInfo. {ADMIN_CONTACT}"
+            else:
+                msg = None
             return pd.Series(
-                {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
+                {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
+                 "ConvError": msg}
             )
 
         # Lbs/Hour = BasisWt/(Area*500) * (CutWidth * NumCuts * NumShtrRolls) * (AvgSpeed * 12) * 60 * SHT_RunAdjust
@@ -577,12 +606,14 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
                 "LbsPerHour": lbs_per_hour,
                 "ConvHrs": total_hours,
                 "ConvertingCostPerCWT": conv_cwt,
+                "ConvError": None,
             }
         )
 
-    except Exception:
+    except Exception as e:
         return pd.Series(
-            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None}
+            {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
+             "ConvError": f"Converting cost could not be calculated: {e}. {ADMIN_CONTACT}"}
         )
 
 
@@ -1811,6 +1842,15 @@ requested_width = None
 
 if st.session_state.search_params:
     exact_matches, alternative_sheets, alternative_rolls, requested_width, alt_sheets_raw, alt_rolls_raw = run_search(st.session_state.search_params)
+    # Reference-table gaps must stop the quote, never fall back to a guess or a blank.
+    _conv_errors = []
+    for _df in (alternative_rolls, alternative_sheets):
+        if _df is not None and not _df.empty and "ConvError" in _df.columns:
+            _conv_errors += [m for m in _df["ConvError"].dropna().unique().tolist() if m]
+    if _conv_errors:
+        for _msg in dict.fromkeys(_conv_errors):
+            st.error(f"\u26d4 {_msg}")
+        st.stop()
 else:
     st.info("Use the search form above to run a search.")
     st.stop()
