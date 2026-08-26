@@ -1460,6 +1460,13 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
         else:
             conv_final = pd.DataFrame(list(conv_series)).reset_index(drop=True)
         out = pd.concat([out.reset_index(drop=True), conv_final], axis=1)
+        # When every row failed to price, these come back all-None and pandas types
+        # the column as null[pyarrow], which raises on any later arithmetic against
+        # a numpy column. astype float64 also strips the arrow backing, which is the
+        # operand type that actually raised.
+        for _c in ("LbsPerHour", "ConvHrs", "ConvertingCostPerCWT"):
+            if _c in out.columns:
+                out[_c] = pd.to_numeric(out[_c], errors="coerce").astype("float64")
 
     if "NetAvgCost" in out.columns and "ConvertingCostPerCWT" in out.columns:
         # Converting cost stays NaN when the reference tables could not price the
@@ -1893,13 +1900,17 @@ if st.session_state.search_params:
                 _bw = _r.get("BasisWt")
                 _label = f"{_g} {_bw:g}#" if (_g and pd.notna(_bw)) else (_g or "some rows")
                 _conv_err_grades.setdefault(str(_r["ConvError"]), set()).add(_label)
-    for _msg, _labels in _conv_err_grades.items():
-        st.error(
-            "\u26d4 Converting cost unavailable for "
-            + ", ".join(sorted(_labels))
-            + f" \u2014 {_msg} These rows show a blank converting cost and cannot be "
-              "quoted until the table is corrected; other grades are unaffected."
+    if _conv_err_grades:
+        _all_labels = sorted({l for ls in _conv_err_grades.values() for l in ls})
+        st.warning(
+            "\u26a0\ufe0f Converting cost cannot be calculated for "
+            + ", ".join(_all_labels)
+            + " \u2014 please contact the app administrator. These grades are listed "
+              "below without a converting cost; all other grades price normally."
         )
+        with st.expander("Details for the app administrator"):
+            for _msg, _labels in _conv_err_grades.items():
+                st.write("- " + ", ".join(sorted(_labels)) + ": " + _msg)
 else:
     st.info("Use the search form above to run a search.")
     st.stop()
@@ -2741,10 +2752,10 @@ for _sel in (selected_alt_rolls, selected_alt_sheets):
         if _sel["ConvError"].notna().any():
             selection_has_conv_error = True
 if selection_has_conv_error:
-    st.error(
-        "\u26d4 One or more selected rows have no converting cost because a "
-        "reference table is incomplete (see the message above). Deselect them to "
-        f"price the rest of the job. {ADMIN_CONTACT}"
+    st.warning(
+        "\u26a0\ufe0f A selected grade has no converting cost, so the job summary "
+        "cannot be totalled. Deselect it to price the rest of the job, or contact "
+        "the app administrator to complete the reference table."
     )
 
 if sheet_width and sheet_length:
