@@ -420,6 +420,14 @@ def make_qty_lbs_fn(params, grade_df=None):
 # =========================================================
 # CONVERTING COST CALCULATION
 # =========================================================
+def _conv_fail(msg):
+    """Converting cost could not be derived -- blank the row and say why."""
+    return pd.Series(
+        {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
+         "ConvError": msg}
+    )
+
+
 def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, machine_info_df, order_quantity=None, order_size_adj_df=None):
     """
     Calculate converting cost metrics for a grouped alternative roll.
@@ -484,27 +492,42 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
         basis_uom = row.get("BasisWtUOM", "LB")
         caliper = float(row.get("Caliper", 0.0) or 0.0)
         area_in = float(grade_row.get("Area(IN)", 0.0) or 0.0)
-        avg_speed = float(
-            machine_row.get(
-                "AvgSpeed(FPM)",
-                machine_row.get(
-                    "avgspeed(FPM)",
-                    machine_row.get("AvgSpeed", 2200.0),
-                ),
-            )
-            or 2200.0
-        )
-        hourly_rate = float(machine_row.get("HourlyRate", 273.0) or 273.0)
-        # Roll_Change_Hrs: explicit check so 0.0 is not treated as falsy
-        rc_val = machine_row.get("Roll_Change_Hrs")
-        roll_change_hrs = 0.25 if (rc_val is None or pd.isna(rc_val)) else float(rc_val)
+        # Machine parameters carry no silent fallbacks: substituting a plausible
+        # speed or rate would be indistinguishable from a real value.
+        def _machine_val(col_names, label, allow_zero=False):
+            for c in col_names:
+                if c in machine_row.index:
+                    v = machine_row.get(c)
+                    if v is None or pd.isna(v):
+                        return None, (f"{label} is missing for '{equip_type}' in "
+                                      f"MachineInfo. {ADMIN_CONTACT}")
+                    try:
+                        f = float(v)
+                    except (ValueError, TypeError):
+                        return None, (f"{label} '{v}' is not numeric for '{equip_type}' in "
+                                      f"MachineInfo. {ADMIN_CONTACT}")
+                    if f < 0 or (f == 0 and not allow_zero):
+                        return None, (f"{label} must be greater than zero for "
+                                      f"'{equip_type}' in MachineInfo. {ADMIN_CONTACT}")
+                    return f, None
+            return None, f"{label} column is missing from MachineInfo. {ADMIN_CONTACT}"
 
-        # Setup_hrs - try multiple column name variations
-        setup_hrs = 0.0
-        for col_name in ["Setup_hrs", "Setup_Hrs", "SetupHrs", "setup_hrs", "SETUP_HRS"]:
-            if col_name in machine_row.index:
-                setup_hrs = float(machine_row.get(col_name, 0.0) or 0.0)
-                break
+        avg_speed, _e = _machine_val(
+            ["AvgSpeed(FPM)", "avgspeed(FPM)", "AvgSpeed"], "AvgSpeed(FPM)")
+        if _e:
+            return _conv_fail(_e)
+        hourly_rate, _e = _machine_val(["HourlyRate"], "HourlyRate")
+        if _e:
+            return _conv_fail(_e)
+        roll_change_hrs, _e = _machine_val(
+            ["Roll_Change_Hrs"], "Roll_Change_Hrs", allow_zero=True)
+        if _e:
+            return _conv_fail(_e)
+        setup_hrs, _e = _machine_val(
+            ["Setup_hrs", "Setup_Hrs", "SetupHrs", "setup_hrs", "SETUP_HRS"],
+            "Setup_Hrs", allow_zero=True)
+        if _e:
+            return _conv_fail(_e)
 
         splits = int(row.get("Splits", 1) or 1)  # NumCuts
 
@@ -514,17 +537,22 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
         if caliper > 0.011:
             num_shtr_rolls = 1
         else:
-            num_shtr_rolls = 1  # default
             num_shtr_rolls_val = paper_row.get("NumShtrRolls", None)
-            if num_shtr_rolls_val is not None and pd.notna(num_shtr_rolls_val):
-                try:
-                    num_shtr_rolls = int(float(num_shtr_rolls_val))
-                except (ValueError, TypeError):
-                    num_shtr_rolls = 1
-
-        # Ensure at least 1
-        if num_shtr_rolls < 1:
-            num_shtr_rolls = 1
+            if num_shtr_rolls_val is None or pd.isna(num_shtr_rolls_val):
+                return _conv_fail(
+                    f"NumShtrRolls is missing for ProductGroupID '{prod_group_id}' "
+                    f"in PaperInformation. {ADMIN_CONTACT}"
+                )
+            try:
+                num_shtr_rolls = int(float(num_shtr_rolls_val))
+            except (ValueError, TypeError):
+                num_shtr_rolls = 0
+            if num_shtr_rolls < 1:
+                return _conv_fail(
+                    f"NumShtrRolls '{num_shtr_rolls_val}' is not a positive whole number "
+                    f"for ProductGroupID '{prod_group_id}' in PaperInformation. "
+                    f"{ADMIN_CONTACT}"
+                )
 
         # SHT_RunAdjust: per-grade sheeting efficiency multiplier.
         # No silent 1.0 fallback. A genuine 1.0 is written explicitly in the table
@@ -551,8 +579,19 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 
         # Basis weight to LB if needed (GSM from Grade table)
         if basis_uom == "GSM":
-            gsm_factor = float(grade_row.get("GSM", 0.0) or 0.0)
-            basis_lb = basis_wt / gsm_factor if gsm_factor else basis_wt
+            gsm_val = grade_row.get("GSM", None)
+            gsm_factor = 0.0
+            if gsm_val is not None and not pd.isna(gsm_val):
+                try:
+                    gsm_factor = float(gsm_val)
+                except (ValueError, TypeError):
+                    gsm_factor = 0.0
+            if gsm_factor <= 0:
+                return _conv_fail(
+                    f"GSM is missing or zero for GradeID '{grade_id}' in the Grade table, "
+                    f"so a GSM basis weight cannot be converted to pounds. {ADMIN_CONTACT}"
+                )
+            basis_lb = basis_wt / gsm_factor
         else:
             basis_lb = basis_wt
 
@@ -1423,8 +1462,10 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
         out = pd.concat([out.reset_index(drop=True), conv_final], axis=1)
 
     if "NetAvgCost" in out.columns and "ConvertingCostPerCWT" in out.columns:
+        # Converting cost stays NaN when the reference tables could not price the
+        # row, so FinalCostCWT blanks out instead of silently equalling paper cost.
         out["FinalCostCWT"] = (
-            out["NetAvgCost"].fillna(0.0) + out["ConvertingCostPerCWT"].fillna(0.0)
+            out["NetAvgCost"].fillna(0.0) + out["ConvertingCostPerCWT"]
         )
 
     if inv_col and inv_col in out.columns:
@@ -1842,15 +1883,23 @@ requested_width = None
 
 if st.session_state.search_params:
     exact_matches, alternative_sheets, alternative_rolls, requested_width, alt_sheets_raw, alt_rolls_raw = run_search(st.session_state.search_params)
-    # Reference-table gaps must stop the quote, never fall back to a guess or a blank.
-    _conv_errors = []
+    # Reference-table gaps blank only the grades they affect; the rest of the
+    # search still prices normally. Never fall back to a guessed rate.
+    _conv_err_grades = {}
     for _df in (alternative_rolls, alternative_sheets):
         if _df is not None and not _df.empty and "ConvError" in _df.columns:
-            _conv_errors += [m for m in _df["ConvError"].dropna().unique().tolist() if m]
-    if _conv_errors:
-        for _msg in dict.fromkeys(_conv_errors):
-            st.error(f"\u26d4 {_msg}")
-        st.stop()
+            for _, _r in _df[_df["ConvError"].notna()].iterrows():
+                _g = str(_r.get("GradeName", "") or "").strip()
+                _bw = _r.get("BasisWt")
+                _label = f"{_g} {_bw:g}#" if (_g and pd.notna(_bw)) else (_g or "some rows")
+                _conv_err_grades.setdefault(str(_r["ConvError"]), set()).add(_label)
+    for _msg, _labels in _conv_err_grades.items():
+        st.error(
+            "\u26d4 Converting cost unavailable for "
+            + ", ".join(sorted(_labels))
+            + f" \u2014 {_msg} These rows show a blank converting cost and cannot be "
+              "quoted until the table is corrected; other grades are unaffected."
+        )
 else:
     st.info("Use the search form above to run a search.")
     st.stop()
@@ -2684,6 +2733,20 @@ selection_mixed_basis_wts = len(_basis_wts_sel) > 1
 # Either kind of mix suppresses Mweight and the job-level converting cost.
 selection_inconsistent = selection_mixed_grades or selection_mixed_basis_wts
 
+# A selected row the reference tables could not price must not fall through to a
+# zero converting cost in the job-level blend -- suppress the summary instead.
+selection_has_conv_error = False
+for _sel in (selected_alt_rolls, selected_alt_sheets):
+    if _sel is not None and not _sel.empty and "ConvError" in _sel.columns:
+        if _sel["ConvError"].notna().any():
+            selection_has_conv_error = True
+if selection_has_conv_error:
+    st.error(
+        "\u26d4 One or more selected rows have no converting cost because a "
+        "reference table is incomplete (see the message above). Deselect them to "
+        f"price the rest of the job. {ADMIN_CONTACT}"
+    )
+
 if sheet_width and sheet_length:
     if not combined_selected.empty:
         if selection_inconsistent:
@@ -2799,6 +2862,7 @@ if (
     # would silently take them from whichever row sorted first. Quote each
     # grade / basis weight separately instead.
     and not selection_inconsistent
+    and not selection_has_conv_error
 ):
     equip_type_sel = "Sheeter"
 
