@@ -161,7 +161,7 @@ def load_supplementary_data():
         grade_df["GSM"] = pd.to_numeric(grade_df["GSM"], errors="coerce")
         grade_df["Area(IN)"] = pd.to_numeric(grade_df["Area(IN)"], errors="coerce")
 
-        # PaperInformation (ProductGroupID + GSM_Factor -> RW_RunAdjust, SHT_RunAdjust, NumShtrRolls, etc.)
+        # PaperInformation (ProductGroupID + Area(IN) -> RW_RunAdjust, SHT_RunAdjust, NumShtrRolls, etc.)
         paper_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=PAPER_INFO_BLOB)
         paper_csv = paper_client.download_blob().readall().decode("utf-8")
         paper_df = pd.read_csv(StringIO(paper_csv))
@@ -420,6 +420,100 @@ def make_qty_lbs_fn(params, grade_df=None):
 # =========================================================
 # CONVERTING COST CALCULATION
 # =========================================================
+# --- PaperInformation lookup -------------------------------------------------
+# The table is keyed on ProductGroupID + Area(IN), not on ProductGroupID alone.
+# A group is not a key: UFS spans seven basis sizes and C2S/C2S-MATTE two each,
+# and NumShtrRolls differs between them, so taking the group's first row silently
+# picks an arbitrary basis size and misprices the job.
+#
+# Area(IN) is the basis size and comes from the Grade table, which is the source
+# of truth for it (24 lb 17x22 and 60 lb 25x38 are the same paper).
+PAPER_AREA_TOL = 1.0
+# Distinct Area(IN) values are at least 86 sq in apart, so a tolerance this small
+# can only absorb recording precision (Grade stores 778.0 and 641.0 where
+# PaperInformation stores 777.75 and 641.25); it can never merge two real sizes.
+
+# Columns the quote actually reads off the resolved row. Duplicate rows that agree
+# on all of these are interchangeable for pricing; ones that disagree are not.
+# Density_Factor is deliberately absent -- only the NCC app reads it, out of its own
+# PaperInfoNCC table, and the two UFS 864 rows differ in nothing else. Treating it as
+# a conflict here would block a grade over a field this quote never looks at.
+_PAPER_PRICING_COLS = (
+    "RW_RunAdjust", "SHT_RunAdjust", "NumShtrRolls", "GSM_Factor",
+)
+
+
+def _fmt_area(v):
+    return f"{float(v):g}"
+
+
+def lookup_paper_row(paper_info_df, product_group_id, area_in, grade_id=""):
+    """Resolve one PaperInformation row from ProductGroupID + Area(IN).
+
+    Returns (row, error) with exactly one of the two set. There is deliberately no
+    fall back to the group's first row: an arbitrary pick among basis sizes is
+    indistinguishable from a correct one and would misprice silently, which is the
+    whole reason this key is a pair.
+    """
+    if paper_info_df is None or "ProductGroupID" not in paper_info_df.columns:
+        return None, f"PaperInformation is unavailable. {ADMIN_CONTACT}"
+
+    pg = str(product_group_id or "").strip()
+    if not pg or pg.lower() == "nan":
+        return None, (f"ProductGroupID is blank for GradeID '{grade_id}' in the Grade "
+                      f"table, so PaperInformation cannot be looked up. {ADMIN_CONTACT}")
+
+    sub = paper_info_df[paper_info_df["ProductGroupID"].astype(str).str.strip() == pg]
+    if sub.empty:
+        return None, f"ProductGroupID '{pg}' is missing from PaperInformation. {ADMIN_CONTACT}"
+
+    if "Area(IN)" not in sub.columns:
+        return None, f"Area(IN) column is missing from PaperInformation. {ADMIN_CONTACT}"
+
+    areas = pd.to_numeric(sub["Area(IN)"], errors="coerce")
+
+    try:
+        area = float(area_in) if area_in is not None and not pd.isna(area_in) else None
+    except (TypeError, ValueError):
+        area = None
+    if area is not None and area <= 0:
+        area = None
+
+    if area is None:
+        # A group with a single row is unambiguous on its own -- the basis size is
+        # not needed to identify which row applies. Only a multi-size group is stuck.
+        if len(sub) == 1:
+            return sub.iloc[0], None
+        return None, (
+            f"Area(IN) is missing for GradeID '{grade_id}' in the Grade table, and "
+            f"ProductGroupID '{pg}' spans {len(sub)} basis sizes "
+            f"({', '.join(_fmt_area(a) for a in sorted(areas.dropna().unique()))}), "
+            f"so the PaperInformation row cannot be identified. {ADMIN_CONTACT}"
+        )
+
+    match = sub[areas == area]
+    if match.empty:
+        match = sub[(areas - area).abs() <= PAPER_AREA_TOL]
+
+    if match.empty:
+        return None, (
+            f"ProductGroupID '{pg}' has no PaperInformation row for basis size "
+            f"{_fmt_area(area)} sq in (GradeID '{grade_id}'); the table has "
+            f"{', '.join(_fmt_area(a) for a in sorted(areas.dropna().unique()))}. "
+            f"{ADMIN_CONTACT}"
+        )
+
+    if len(match) > 1:
+        cols = [c for c in _PAPER_PRICING_COLS if c in match.columns]
+        if cols and match[cols].drop_duplicates().shape[0] > 1:
+            return None, (
+                f"ProductGroupID '{pg}' has {len(match)} conflicting PaperInformation "
+                f"rows for basis size {_fmt_area(area)} sq in. {ADMIN_CONTACT}"
+            )
+
+    return match.iloc[0], None
+
+
 def _conv_fail(msg):
     """Converting cost could not be derived -- blank the row and say why."""
     return pd.Series(
@@ -435,7 +529,7 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 
     Data sources:
     - Grade table: GradeID -> Area(IN), GSM, ProductGroupID
-    - PaperInformation: ProductGroupID + GSM_Factor -> RW_RunAdjust, SHT_RunAdjust, NumShtrRolls
+    - PaperInformation: ProductGroupID + Area(IN) -> RW_RunAdjust, SHT_RunAdjust, NumShtrRolls
     - MachineInfo: EquipType -> AvgSpeed, HourlyRate, Roll_Change_Hrs, Setup_Hrs
 
     NumShtrRolls logic:
@@ -458,16 +552,19 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             if not gr.empty:
                 grade_row = gr.iloc[0]
 
-        # Lookup paper info (SHT_RunAdjust, NumShtrRolls) via ProductGroupID from Grade table
-        paper_row = None
-        prod_group_id = ""
-        if grade_row is not None and paper_info_df is not None:
-            prod_group_id = str(grade_row["ProductGroupID"]).strip()
-            pr = paper_info_df[
-                paper_info_df["ProductGroupID"].astype(str).str.strip() == prod_group_id
-            ]
-            if not pr.empty:
-                paper_row = pr.iloc[0]
+        if grade_row is None:
+            return _conv_fail(
+                f"GradeID '{grade_id}' is missing from the Grade table. {ADMIN_CONTACT}"
+            )
+
+        # Lookup paper info (SHT_RunAdjust, NumShtrRolls) on ProductGroupID + Area(IN),
+        # both taken from the Grade table -- see lookup_paper_row().
+        prod_group_id = str(grade_row["ProductGroupID"]).strip()
+        paper_row, paper_err = lookup_paper_row(
+            paper_info_df, prod_group_id, grade_row.get("Area(IN)"), grade_id
+        )
+        if paper_err:
+            return _conv_fail(paper_err)
 
         # Lookup machine info
         machine_row = None
@@ -475,16 +572,9 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             mr = machine_info_df[machine_info_df["EquipType"].astype(str).str.strip() == equip_type]
             machine_row = mr.iloc[0] if len(mr) else None
 
-        if grade_row is None or paper_row is None or machine_row is None:
-            if grade_row is None:
-                msg = f"GradeID '{grade_id}' is missing from the Grade table. {ADMIN_CONTACT}"
-            elif paper_row is None:
-                msg = f"ProductGroupID '{prod_group_id}' is missing from PaperInformation. {ADMIN_CONTACT}"
-            else:
-                msg = f"EquipType '{equip_type}' is missing from MachineInfo. {ADMIN_CONTACT}"
-            return pd.Series(
-                {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
-                 "ConvError": msg}
+        if machine_row is None:
+            return _conv_fail(
+                f"EquipType '{equip_type}' is missing from MachineInfo. {ADMIN_CONTACT}"
             )
 
         # Inputs
@@ -533,14 +623,14 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
 
         # Determine NumShtrRolls based on caliper
         # If caliper > 0.011 (board grade): NumShtrRolls = 1
-        # Otherwise: lookup from PaperInformation (already joined via ProductGroupID + GSM)
+        # Otherwise: lookup from PaperInformation (joined via ProductGroupID + Area(IN))
         if caliper > 0.011:
             num_shtr_rolls = 1
         else:
             num_shtr_rolls_val = paper_row.get("NumShtrRolls", None)
             if num_shtr_rolls_val is None or pd.isna(num_shtr_rolls_val):
                 return _conv_fail(
-                    f"NumShtrRolls is missing for ProductGroupID '{prod_group_id}' "
+                    f"NumShtrRolls is missing for ProductGroupID '{prod_group_id}' at basis size {_fmt_area(area_in)} sq in "
                     f"in PaperInformation. {ADMIN_CONTACT}"
                 )
             try:
@@ -550,7 +640,7 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             if num_shtr_rolls < 1:
                 return _conv_fail(
                     f"NumShtrRolls '{num_shtr_rolls_val}' is not a positive whole number "
-                    f"for ProductGroupID '{prod_group_id}' in PaperInformation. "
+                    f"for ProductGroupID '{prod_group_id}' at basis size {_fmt_area(area_in)} sq in in PaperInformation. "
                     f"{ADMIN_CONTACT}"
                 )
 
@@ -563,7 +653,8 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             return pd.Series(
                 {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
                  "ConvError": f"SHT_RunAdjust is missing for ProductGroupID "
-                              f"'{prod_group_id}' in PaperInformation. {ADMIN_CONTACT}"}
+                              f"'{prod_group_id}' at basis size {_fmt_area(area_in)} sq in "
+                              f"in PaperInformation. {ADMIN_CONTACT}"}
             )
         try:
             sht_run_adjust = float(sht_run_adjust_val)
@@ -573,7 +664,7 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             return pd.Series(
                 {"LbsPerHour": None, "ConvHrs": None, "ConvertingCostPerCWT": None,
                  "ConvError": f"SHT_RunAdjust '{sht_run_adjust_val}' is not a positive number "
-                              f"for ProductGroupID '{prod_group_id}' in PaperInformation. "
+                              f"for ProductGroupID '{prod_group_id}' at basis size {_fmt_area(area_in)} sq in in PaperInformation. "
                               f"{ADMIN_CONTACT}"}
             )
 
@@ -2912,19 +3003,28 @@ if (
             )
             avg_yield_per_roll = (total_y_rolls / total_units) if total_units > 0 else total_y_rolls
 
-            # Rolls running simultaneously (Sheeter + thin stock → NumShtrRolls)
+            # Rolls running simultaneously (Sheeter + thin stock → NumShtrRolls).
+            # Same ProductGroupID + Area(IN) key as the per-row stage, so the job
+            # blend cannot land on a different basis size than the rows it blends.
             first_caliper = float(selected_alt_rolls.iloc[0].get("Caliper", 0) or 0)
             rolls_running = 1
-            if first_caliper > 0 and first_caliper <= 0.011 and paper_info_df is not None:
-                first_pg = str(selected_alt_rolls.iloc[0].get("ProductGroupID", "")).strip()
-                if first_pg and "ProductGroupID" in paper_info_df.columns:
-                    pr = paper_info_df[
-                        paper_info_df["ProductGroupID"].astype(str).str.strip() == first_pg
-                    ]
-                    if not pr.empty:
-                        nsr = pr.iloc[0].get("NumShtrRolls")
-                        if nsr is not None and pd.notna(nsr) and float(nsr) > 0:
-                            rolls_running = int(float(nsr))
+            if first_caliper > 0 and first_caliper <= 0.011:
+                first_row = selected_alt_rolls.iloc[0]
+                first_gid = str(first_row.get("GradeID", "")).strip()
+                first_pg = str(first_row.get("ProductGroupID", "")).strip()
+                first_area = None
+                if grade_df is not None and first_gid and first_gid.lower() != "nan":
+                    gm = grade_df[grade_df["GradeID"].astype(str).str.strip() == first_gid]
+                    if not gm.empty:
+                        first_pg = str(gm.iloc[0].get("ProductGroupID", first_pg)).strip()
+                        first_area = gm.iloc[0].get("Area(IN)")
+                pr_row, _pr_err = lookup_paper_row(
+                    paper_info_df, first_pg, first_area, first_gid
+                )
+                if pr_row is not None:
+                    nsr = pr_row.get("NumShtrRolls")
+                    if nsr is not None and pd.notna(nsr) and float(nsr) > 0:
+                        rolls_running = int(float(nsr))
 
             mr_sheeter = machine_info_df[
                 machine_info_df["EquipType"].astype(str).str.strip() == equip_type_sel
