@@ -37,6 +37,77 @@ from reportlab.lib.units import inch
 # =========================================================
 st.set_page_config(page_title="Norkol Sheet Stock Search", page_icon="📦", layout="wide")
 
+# --- No-wrap display -------------------------------------------------------
+# Display fields stay on one line and scroll sideways instead of wrapping.
+st.markdown(
+    """
+    <style>
+    /* Hand-built results lists (containers keyed nowrap_*): scroll, never wrap */
+    div[class*="st-key-nowrap_"] { overflow-x: auto; }
+    div[class*="st-key-nowrap_"] div[data-testid="stHorizontalBlock"] { flex-wrap: nowrap; }
+    div[class*="st-key-nowrap_"] div[data-testid="stColumn"],
+    div[class*="st-key-nowrap_"] div[data-testid="column"] { min-width: 0 !important; }
+    div[class*="st-key-nowrap_"] [data-testid="stMarkdownContainer"] p { white-space: nowrap; }
+    /* Summary tile rows: each tile keeps its content width and the row scrolls */
+    div[data-testid="stHorizontalBlock"]:has(div[data-testid="stMetric"]) { flex-wrap: nowrap; overflow-x: auto; }
+    div[data-testid="stHorizontalBlock"]:has(div[data-testid="stMetric"]) > div { min-width: max-content !important; }
+    div[data-testid="stMetric"] label, div[data-testid="stMetric"] label p,
+    div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] > div { white-space: nowrap; }
+    /* Breakdown tables */
+    div[data-testid="stTable"] { overflow-x: auto; }
+    div[data-testid="stTable"] th, div[data-testid="stTable"] td { white-space: nowrap; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+_NOWRAP_CHAR_PX = 9         # roughly one character of the body font
+_NOWRAP_CELL_PAD = 20
+_NOWRAP_PX_PER_RATIO = 95
+_NOWRAP_GAP_PX = 16         # Streamlit's gap between columns
+
+# Text columns in the results lists, by header: dataframe column or row -> text.
+_NOWRAP_TEXT = {
+    "Grade": "GradeName",
+    "Mill": "Mill",
+    "Brand": "Brand",
+    "Reserved For": lambda r: _reserved_label(r),
+}
+
+
+def nowrap_widths(ratios, headers, df=None, text_values=_NOWRAP_TEXT):
+    """Pixel widths for a hand-built results list, so no cell has to wrap.
+
+    Each column is at least its old ratio's share, as wide as its header and, for
+    the text columns in text_values, as wide as its longest value. The header
+    row and every data row use the same widths, so the columns stay lined up.
+    """
+    widths = []
+    for ratio, header in zip(ratios, headers):
+        w = max(ratio * _NOWRAP_PX_PER_RATIO, len(str(header)) * _NOWRAP_CHAR_PX + _NOWRAP_CELL_PAD)
+        src = text_values.get(header)
+        if df is not None and not df.empty and src is not None:
+            if callable(src):
+                longest = max(len(str(src(r))) for _, r in df.iterrows())
+            elif src in df.columns:
+                longest = int(df[src].fillna("").astype(str).str.len().max())
+            else:
+                longest = 0
+            w = max(w, longest * _NOWRAP_CHAR_PX + _NOWRAP_CELL_PAD)
+        widths.append(int(round(w)))
+    return widths
+
+
+def nowrap_list(key, widths):
+    """Container for a results list that scrolls sideways instead of wrapping."""
+    min_px = sum(widths) + _NOWRAP_GAP_PX * (len(widths) - 1)
+    st.markdown(
+        f"<style>div.st-key-{key} div[data-testid='stHorizontalBlock'] {{ min-width: {min_px}px; }}</style>",
+        unsafe_allow_html=True,
+    )
+    return st.container(key=key)
+
+
 # Session state: selections & search params
 if "sel_exact_idx" not in st.session_state:
     st.session_state.sel_exact_idx = set()
@@ -2255,14 +2326,16 @@ if not exact_matches.empty:
         exact_ratios.append(1.8)
         exact_headers.append("Reserved For")
 
-    header_cols = st.columns(exact_ratios)
+    exact_ratios = nowrap_widths(exact_ratios, exact_headers, exact_matches)
+    _exact_list = nowrap_list("nowrap_exact", exact_ratios)
+    header_cols = _exact_list.columns(exact_ratios)
     for _i, _title in enumerate(exact_headers):
         with header_cols[_i]:
             st.markdown(f"**{_title}**")
-    st.markdown("---")
+    _exact_list.markdown("---")
 
     for idx, row in exact_matches.iterrows():
-        cols = st.columns(exact_ratios)
+        cols = _exact_list.columns(exact_ratios)
         key = f"exact_{idx}"
 
         with cols[0]:
@@ -2375,15 +2448,17 @@ if not alternative_sheets.empty:
         sheet_ratios = sheet_ratios + [1.8]   # 15 Reserved For
         sheet_headers.append("Reserved For")
 
-    H_sh = st.columns(sheet_ratios)
+    sheet_ratios = nowrap_widths(sheet_ratios, sheet_headers, alternative_sheets)
+    _sheet_list = nowrap_list("nowrap_alt_sheets", sheet_ratios)
+    H_sh = _sheet_list.columns(sheet_ratios)
     for i, title in enumerate(sheet_headers):
         with H_sh[i]:
             st.markdown(f"**{title}**")
 
-    st.markdown("---")
+    _sheet_list.markdown("---")
 
     for idx, row in alternative_sheets.iterrows():
-        C = st.columns(sheet_ratios)
+        C = _sheet_list.columns(sheet_ratios)
         key = f"alt_sheet_{idx}"
 
         with C[0]:
@@ -2653,15 +2728,17 @@ if not alternative_rolls.empty:
         roll_ratios = roll_ratios + [1.8]   # 17 Reserved For
         roll_headers.append("Reserved For")
 
-    H_rl = st.columns(roll_ratios)
+    roll_ratios = nowrap_widths(roll_ratios, roll_headers, alternative_rolls)
+    _roll_list = nowrap_list("nowrap_alt_rolls", roll_ratios)
+    H_rl = _roll_list.columns(roll_ratios)
     for i, title in enumerate(roll_headers):
         with H_rl[i]:
             st.markdown(f"**{title}**")
 
-    st.markdown("---")
+    _roll_list.markdown("---")
 
     for idx, row in alternative_rolls.iterrows():
-        C = st.columns(roll_ratios)
+        C = _roll_list.columns(roll_ratios)
         key = f"alt_roll_{idx}"
 
         with C[0]:
