@@ -817,6 +817,17 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             else None
         )
 
+        # Line items carry the full converting cost for the order: the base above,
+        # then the OrderQty upcharge, then the machine minimum -- the same steps as
+        # the Order Qty Cost breakdown, so one selected line matches it.
+        if conv_cwt is not None:
+            qty_for_order = order_lbs or process_weight
+            if order_size_adj_df is not None and qty_for_order:
+                conv_cwt *= 1 + get_order_size_pct(order_size_adj_df, equip_type, "OrderQty", qty_for_order)
+            min_chg = pd.to_numeric(machine_row.get("Minimum Charge"), errors="coerce")
+            if pd.notna(min_chg) and min_chg > 0 and qty_for_order:
+                conv_cwt = max(conv_cwt, float(min_chg) / qty_for_order * 100.0)
+
         return pd.Series(
             {
                 "LbsPerHour": lbs_per_hour,
@@ -3777,7 +3788,10 @@ if conv_breakdown is not None and order_qty_cost_cwt is not None:
             rows.append((
                 "Minimum charge",
                 f"${conv_breakdown['min_chg']:,.2f}"
-                + ("  (applied)" if conv_breakdown["min_applies"] else "  (not reached)"),
+                + (
+                    f"  (applied)  →  ${conv_breakdown['final_conv_cwt']:,.2f} / CWT"
+                    if conv_breakdown["min_applies"] else "  (not reached)"
+                ),
             ))
         else:
             rows.append(("Minimum charge", "none"))
