@@ -2823,17 +2823,77 @@ def _distinct(col):
 # Both grade keys are checked: a frame missing GradeID would otherwise drop out
 # of the count and let a mixed-grade selection through as if it were uniform.
 _grade_names_sel = sorted(_distinct("GradeName"))
-selection_mixed_grades = max(len(_distinct("GradeID")), len(_grade_names_sel)) > 1
+
+
+def _grade_pricing_key(gid, gname):
+    """(ProductGroupID, Area(IN), GSM) for a grade, from the Grade table.
+
+    Grades that agree on all three may be quoted together at the same basis
+    weight and caliper, whatever their name -- e.g. C2TMP and C2TMP PEFC. Area(IN)
+    keeps 80 lb cover (520) apart from 80 lb text (950). A grade the tables cannot
+    resolve, including one with no PaperInformation row, keys on its own identity
+    and stays distinct.
+    """
+    gm = pd.DataFrame()
+    if grade_df is not None:
+        if gid and "GradeID" in grade_df.columns:
+            gm = grade_df[grade_df["GradeID"].astype(str).str.strip() == gid]
+        if gm.empty and gname and "Description" in grade_df.columns:
+            gm = grade_df[grade_df["Description"].astype(str).str.strip() == gname]
+    if gm.empty:
+        return ("unresolved", gid or gname)
+    g = gm.iloc[0]
+    area = pd.to_numeric(g.get("Area(IN)"), errors="coerce")
+    gsm = pd.to_numeric(g.get("GSM"), errors="coerce")
+    if pd.isna(area) or pd.isna(gsm):
+        return ("unresolved", gid or gname)
+    pg = str(g.get("ProductGroupID", "") or "").strip()
+    _paper_row, paper_err = lookup_paper_row(paper_info_df, pg, float(area), gid)
+    if paper_err:
+        return ("unresolved", gid or gname)
+    return (pg, round(float(area), 2), round(float(gsm), 4))
+
+
+_pricing_keys_sel = set()
+_key_cols = [c for c in ("GradeID", "GradeName") if c in combined_selected.columns]
+if not combined_selected.empty and _key_cols:
+    for _, _r in combined_selected[_key_cols].drop_duplicates().iterrows():
+        _gid = str(_r.get("GradeID", "") or "").strip()
+        _gname = str(_r.get("GradeName", "") or "").strip()
+        _gid = "" if _gid.lower() == "nan" else _gid
+        _gname = "" if _gname.lower() == "nan" else _gname
+        if _gid or _gname:
+            _pricing_keys_sel.add(_grade_pricing_key(_gid, _gname))
+
+_multiple_grades_sel = max(len(_distinct("GradeID")), len(_grade_names_sel)) > 1
+selection_mixed_grades = len(_pricing_keys_sel) > 1
+
+# Different grades that do price alike may only be combined at a single caliper.
+_calipers_sel = (
+    pd.to_numeric(combined_selected["Caliper"], errors="coerce").dropna().round(4).unique()
+    if (not combined_selected.empty and "Caliper" in combined_selected.columns)
+    else []
+)
+selection_mixed_calipers = (
+    _multiple_grades_sel and not selection_mixed_grades and len(_calipers_sel) > 1
+)
 
 _basis_wts_sel = (
     pd.to_numeric(combined_selected["BasisWt"], errors="coerce").dropna().unique()
     if (not combined_selected.empty and "BasisWt" in combined_selected.columns)
     else []
 )
-selection_mixed_basis_wts = len(_basis_wts_sel) > 1
+# 80 LB and 80 GSM are not the same basis weight, and Mweight takes its unit
+# from the first selected row, so mixed units count as mixed basis weights.
+_basis_uoms_sel = sorted({
+    u.upper() for u in _distinct("BasisWtUOM")
+})
+selection_mixed_basis_wts = len(_basis_wts_sel) > 1 or len(_basis_uoms_sel) > 1
 
 # Either kind of mix suppresses Mweight and the job-level converting cost.
-selection_inconsistent = selection_mixed_grades or selection_mixed_basis_wts
+selection_inconsistent = (
+    selection_mixed_grades or selection_mixed_basis_wts or selection_mixed_calipers
+)
 
 # A selected row the reference tables could not price must not fall through to a
 # zero converting cost in the job-level blend -- suppress the summary instead.
@@ -3280,14 +3340,24 @@ if selection_mixed_grades:
         "**Multiple grades selected"
         + (f" ({', '.join(_grade_names_sel)})" if _grade_names_sel else "")
         + "** — Mweight, converting cost and Order Qty Cost are not calculated. "
-        "Grades are not interchangeable; quote each one separately and combine the results."
+        "These grades differ in product group, basis size (Area) or GSM factor; "
+        "quote each one separately and combine the results."
     )
 elif selection_mixed_basis_wts:
     st.error(
         "**Non-uniform basis weights selected"
         + (f" ({', '.join(f'{b:g}' for b in sorted(_basis_wts_sel))})" if len(_basis_wts_sel) else "")
+        + (f" in mixed units ({', '.join(_basis_uoms_sel)})" if len(_basis_uoms_sel) > 1 else "")
         + "** — Mweight, converting cost and Order Qty Cost are not calculated. "
         "Basis weights run at different speeds; quote each one separately and combine the results."
+    )
+elif selection_mixed_calipers:
+    st.error(
+        "**Different calipers selected across grades"
+        + (f" ({', '.join(f'{c:g}' for c in sorted(_calipers_sel))})" if len(_calipers_sel) else "")
+        + "** — Mweight, converting cost and Order Qty Cost are not calculated. "
+        "Grades can only be combined at the same basis weight and caliper; quote each "
+        "caliper separately and combine the results."
     )
 
 # --- Order Qty Cost breakdown (base rate, upcharge, minimum, freight) ---
