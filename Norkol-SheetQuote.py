@@ -593,7 +593,7 @@ def _conv_fail(msg):
     )
 
 
-def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, machine_info_df, order_quantity=None, order_size_adj_df=None):
+def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, machine_info_df, order_quantity=None, order_size_adj_df=None, pool_lbs_per_roll=None):
     """
     Calculate converting cost metrics for a grouped alternative roll.
     Uses Yield (preferred) or QtyOnHand as processing weight.
@@ -803,7 +803,13 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
             _oq = pd.to_numeric(row.get("OrderQtyLbs"), errors="coerce")
             order_lbs = float(_oq) if pd.notna(_oq) and _oq > 0 else None
         rate_qty = max(order_lbs or process_weight or 0.0, 20000.0)
-        lbs_per_roll = (process_weight / num_rolls) if num_rolls > 0 else process_weight
+        # Roll weight for the roll-change count: the pool's average when given, so
+        # a lot of light rolls isn't charged extra changes it may never cause; the
+        # selection re-prices with the average of the lots actually picked.
+        if pool_lbs_per_roll and pool_lbs_per_roll > 0:
+            lbs_per_roll = pool_lbs_per_roll
+        else:
+            lbs_per_roll = (process_weight / num_rolls) if num_rolls > 0 else process_weight
         rolls_needed = int(np.ceil(rate_qty / lbs_per_roll)) if lbs_per_roll and lbs_per_roll > 0 else 1
         rate_roll_changes = int(np.ceil(rolls_needed / num_shtr_rolls))
         rate_hours = (
@@ -1872,10 +1878,16 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
         and paper_info_df is not None
         and machine_info_df is not None
     ):
+        # Average roll weight across every row being priced here -- the whole list
+        # before selection, the picked lots after -- so rows share one roll-change basis.
+        _units_total = pd.to_numeric(out["Units"], errors="coerce").sum() if "Units" in out.columns else 0
+        _yield_total = pd.to_numeric(out["Yield"], errors="coerce").sum() if "Yield" in out.columns else 0
+        pool_lbs_per_roll = (_yield_total / _units_total) if (_units_total and _units_total > 0 and _yield_total > 0) else None
         conv_series = out.apply(
             lambda r: calculate_conversion_cost(
                 r, requested_width, grade_df, paper_info_df, machine_info_df,
-                order_quantity=order_quantity, order_size_adj_df=order_size_adj_df
+                order_quantity=order_quantity, order_size_adj_df=order_size_adj_df,
+                pool_lbs_per_roll=pool_lbs_per_roll,
             ),
             axis=1,
         )
