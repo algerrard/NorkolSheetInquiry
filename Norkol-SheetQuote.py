@@ -1485,6 +1485,230 @@ def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_
     return out
 
 
+# =========================================================
+# PURCHASE OPTIONS
+# =========================================================
+PURCHASE_MILL = "Purchase Option"
+PURCHASE_ROWS_DEFAULT = 3
+
+# Display labels for the priced purchase lines.
+PURCHASE_RESULT_LABELS = {
+    "GradeName": "Grade", "BasisWt": "Basis Wt", "BasisWtUOM": "UOM", "Caliper": "Caliper",
+    "Roll_Width": "Roll Width", "Splits": "Splits", "Waste_Pct": "Trim %",
+    "QtyOnHand": "Purchase Lbs", "Units": "Est. Rolls", "Yield": "Yield Lbs",
+    "AvgCost": "Material $/CWT", "NetAvgCost": "Net Material $/CWT",
+    "ConvertingCostPerCWT": "Converting $/CWT", "FinalCostCWT": "Final $/CWT",
+}
+
+
+def purchase_seed(n=PURCHASE_ROWS_DEFAULT):
+    """Blank rows for the Purchase Options editor."""
+    return pd.DataFrame({
+        "Use": pd.Series([False] * n, dtype=bool),
+        "Grade": pd.Series([None] * n, dtype=object),
+        "Basis Wt": pd.Series([np.nan] * n, dtype=float),
+        "UOM": pd.Series(["LB"] * n, dtype=object),
+        "Caliper (in)": pd.Series([np.nan] * n, dtype=float),
+        "Roll Width (in)": pd.Series([np.nan] * n, dtype=float),
+        "Diameter (in)": pd.Series([np.nan] * n, dtype=float),
+        "Cost $/CWT": pd.Series([np.nan] * n, dtype=float),
+        "Lbs (optional)": pd.Series([np.nan] * n, dtype=float),
+    })
+
+
+def _purchase_num(v):
+    v = pd.to_numeric(v, errors="coerce")
+    return None if pd.isna(v) else float(v)
+
+
+def _purchase_covered_lbs(*frames):
+    """Pounds the selected inventory already supplies: (frame, column) pairs."""
+    total = 0.0
+    for frame, col in frames:
+        if frame is not None and not frame.empty and col in frame.columns:
+            total += float(pd.to_numeric(frame[col], errors="coerce").fillna(0.0).sum())
+    return total
+
+
+def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_for,
+                         equip_for, grade_df, paper_info_df, order_size_adj_df,
+                         exact_at_width=False):
+    """Turn checked Purchase Options rows into inventory-shaped rows.
+
+    Each row gets what an inventory lot carries -- QtyOnHand, Units, InvValue,
+    Splits, Waste_Pct -- so the existing aggregation and converting math price it
+    unchanged. Rows with Lbs entered buy that weight. Rows left blank share the
+    order quantity not already covered by selected inventory and the Lbs rows,
+    grossed up for trim and run waste so their yield fills the gap.
+
+    Roll count comes from diameter the way the NCC app estimates it:
+    (Diameter^2 - Core^2) x Width x Density_Factor, with the core from caliper
+    (under 0.008 in -> 3 in, otherwise 12 in).
+
+    Returns (alt_rows, exact_rows, errors, notes). Any error withholds every
+    purchase row: a partial purchase would price a different job than the one
+    on screen.
+    """
+    empty = pd.DataFrame()
+    errors, notes, prepared = [], [], []
+    if editor_df is None or editor_df.empty or "Use" not in editor_df.columns:
+        return empty, empty, errors, notes
+
+    rows = editor_df.reset_index(drop=True)
+    for pos, r in rows.iterrows():
+        if r.get("Use") != True:
+            continue
+        label = f"Purchase row {pos + 1}"
+        grade = str(r.get("Grade") or "").strip()
+        bw = _purchase_num(r.get("Basis Wt"))
+        uom = str(r.get("UOM") or "").strip().upper()
+        cal = _purchase_num(r.get("Caliper (in)"))
+        width = _purchase_num(r.get("Roll Width (in)"))
+        diam = _purchase_num(r.get("Diameter (in)"))
+        cost = _purchase_num(r.get("Cost $/CWT"))
+        lbs = _purchase_num(r.get("Lbs (optional)"))
+
+        missing = [name for name, v in (
+            ("Grade", grade), ("Basis Wt", bw), ("UOM", uom), ("Caliper", cal),
+            ("Roll Width", width), ("Diameter", diam), ("Cost $/CWT", cost),
+        ) if not v]
+        if missing:
+            errors.append(f"{label}: enter {', '.join(missing)}.")
+            continue
+        if uom not in ("LB", "GSM"):
+            errors.append(f"{label}: UOM must be LB or GSM.")
+            continue
+        if not (0.002 <= cal <= 0.100):
+            errors.append(f"{label}: caliper {cal:g} in is outside 0.002-0.100 in. "
+                          "Enter caliper in inches (11 pt = 0.011).")
+            continue
+        if lbs is not None and lbs <= 0:
+            errors.append(f"{label}: Lbs must be greater than zero, or left blank.")
+            continue
+        if not requested_width or requested_width <= 0:
+            errors.append(f"{label}: search with the width needed first.")
+            continue
+        if width < requested_width:
+            errors.append(f"{label}: roll width {width:g}\" is narrower than the "
+                          f"{requested_width:g}\" needed.")
+            continue
+
+        gm = (
+            grade_df[grade_df["Description"].astype(str).str.strip() == grade]
+            if grade_df is not None and "Description" in grade_df.columns
+            else pd.DataFrame()
+        )
+        if gm.empty:
+            errors.append(f"{label}: grade '{grade}' is missing from the Grade table. {ADMIN_CONTACT}")
+            continue
+        g = gm.iloc[0]
+        gid = str(g.get("GradeID", "") or "").strip()
+        area = _purchase_num(g.get("Area(IN)"))
+        if not area or area <= 0:
+            errors.append(f"{label}: Area(IN) is missing for grade '{grade}' in the Grade table. {ADMIN_CONTACT}")
+            continue
+        pg = str(g.get("ProductGroupID", "") or "").strip()
+        paper_row, paper_err = lookup_paper_row(paper_info_df, pg, area, gid)
+        if paper_err:
+            errors.append(f"{label}: {paper_err}")
+            continue
+        density = _purchase_num(paper_row.get("Density_Factor"))
+        if not density or density <= 0:
+            errors.append(
+                f"{label}: Density_Factor is missing for ProductGroupID '{pg}' at basis size "
+                f"{area:g} sq in in PaperInformation, so roll count cannot be estimated. {ADMIN_CONTACT}"
+            )
+            continue
+        core = 3.0 if cal < 0.008 else 12.0
+        if diam <= core:
+            errors.append(f"{label}: diameter {diam:g}\" must be larger than the {core:g}\" core.")
+            continue
+
+        exact = exact_at_width and abs(width - requested_width) < 1e-6
+        if exact:
+            splits, waste_pct = 1, 0.0
+        else:
+            splits = int(width // requested_width)
+            waste_pct = (width - splits * requested_width) / width * 100.0
+
+        grade_name = str(g.get("Description", grade)).strip()
+        oq = order_qty_lbs_for({"GradeID": gid, "BasisWt": bw, "BasisWtUOM": uom})
+        run_waste = 0.0
+        if not exact and oq and order_size_adj_df is not None:
+            run_waste = get_order_size_pct(order_size_adj_df, equip_for(grade_name), "RunWaste", oq)
+        yield_factor = (1 - waste_pct / 100.0) * (1 - run_waste)
+        if yield_factor <= 0:
+            errors.append(f"{label}: trim and run waste leave no usable yield.")
+            continue
+
+        prepared.append({
+            "label": label, "exact": exact, "lbs": lbs, "oq": oq, "factor": yield_factor,
+            "cost": cost, "roll_wt": (diam ** 2 - core ** 2) * width * density,
+            "row": {
+                "GradeID": gid, "GradeName": grade_name, "ProductGroupID": pg,
+                "ProductCategoryID": g.get("ProductCategoryID"),
+                "BasisWt": bw, "BasisWtUOM": uom, "Caliper": cal, "Roll_Width": width,
+                "Diameter": diam, "Splits": splits, "Waste_Pct": waste_pct,
+                "Mill": PURCHASE_MILL, "Brand": "",
+            },
+        })
+
+    if errors:
+        return empty, empty, errors, notes
+
+    blank = [p for p in prepared if p["lbs"] is None]
+    if blank:
+        oq_ref = blank[0]["oq"]
+        if not oq_ref:
+            errors.append(
+                "Enter Lbs on " + ", ".join(p["label"] for p in blank)
+                + ", or search with an order quantity so they can be sized to the order."
+            )
+            return empty, empty, errors, notes
+        entered_yield = sum(p["lbs"] * p["factor"] for p in prepared if p["lbs"] is not None)
+        remaining = oq_ref - covered_lbs - entered_yield
+        if remaining <= 0:
+            notes.append(
+                f"The order ({oq_ref:,.0f} lbs) is already covered by the selected inventory"
+                + (" and purchase rows with Lbs" if entered_yield else "")
+                + ", so " + ", ".join(p["label"] for p in blank)
+                + (" adds" if len(blank) == 1 else " add") + " nothing."
+            )
+            prepared = [p for p in prepared if p["lbs"] is not None]
+        else:
+            share = remaining / len(blank)
+            for p in blank:
+                p["lbs"] = share / p["factor"]
+
+    alt_rows, exact_rows = [], []
+    for p in prepared:
+        row = dict(p["row"])
+        row["QtyOnHand"] = p["lbs"]
+        row["Units"] = max(1, int(np.ceil(p["lbs"] / p["roll_wt"]))) if p["roll_wt"] > 0 else 1
+        row["InvValue"] = p["cost"] * p["lbs"] / 100.0
+        row["AvgCost"] = p["cost"]
+        (exact_rows if p["exact"] else alt_rows).append(row)
+    return pd.DataFrame(alt_rows), pd.DataFrame(exact_rows), errors, notes
+
+
+def render_purchase_result(slot, priced, errors, notes):
+    """Write the priced purchase lines (or why they were withheld) into the box."""
+    with slot:
+        for e in errors:
+            st.error(e)
+        if errors:
+            st.caption("Purchase options are left out of the summary until these rows are fixed.")
+        for n in notes:
+            st.warning(n)
+        if priced is not None and not priced.empty:
+            cols = [c for c in PURCHASE_RESULT_LABELS if c in priced.columns]
+            show = priced[cols].copy()
+            for c in show.select_dtypes("number").columns:
+                show[c] = show[c].round(2)
+            st.dataframe(show.rename(columns=PURCHASE_RESULT_LABELS), hide_index=True,
+                         use_container_width=True)
+
+
 def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_df,
                          grade_df, paper_info_df, machine_info_df, qty_lbs_fn=None):
     """Aggregate raw roll rows into group rows with derived metrics."""
@@ -2649,6 +2873,47 @@ else:
 
 
 # =========================================================
+# PURCHASE OPTIONS (entry box; priced in the summary below)
+# =========================================================
+st.markdown("---")
+st.subheader("🛒 Purchase Options")
+st.caption(
+    "Material we could buy instead of, or alongside, inventory. Check \"Base quote on this\" "
+    "to include a row. Rows with Lbs buy that weight; rows left blank share whatever part of "
+    "the order the selected inventory does not cover. Caliper in inches (11 pt = 0.011)."
+)
+_purchase_grade_opts = (
+    sorted(grade_df["Description"].dropna().astype(str).str.strip().unique().tolist())
+    if grade_df is not None and "Description" in grade_df.columns
+    else []
+)
+_purchase_rc = st.session_state.get("reset_counter", 0)
+_purchase_seed_key = f"purchase_seed_{_purchase_rc}"
+if _purchase_seed_key not in st.session_state:
+    st.session_state[_purchase_seed_key] = purchase_seed()
+purchase_editor_df = st.data_editor(
+    st.session_state[_purchase_seed_key],
+    column_config={
+        "Use": st.column_config.CheckboxColumn("Base quote on this", default=False),
+        "Grade": st.column_config.SelectboxColumn("Grade", options=_purchase_grade_opts),
+        "Basis Wt": st.column_config.NumberColumn("Basis Wt", min_value=0.0, format="%.2f"),
+        "UOM": st.column_config.SelectboxColumn("UOM", options=["LB", "GSM"], default="LB"),
+        "Caliper (in)": st.column_config.NumberColumn("Caliper (in)", min_value=0.0, step=0.0001, format="%.4f"),
+        "Roll Width (in)": st.column_config.NumberColumn("Roll Width (in)", min_value=0.0, format="%.3f"),
+        "Diameter (in)": st.column_config.NumberColumn("Diameter (in)", min_value=0.0, format="%.2f"),
+        "Cost $/CWT": st.column_config.NumberColumn("Cost $/CWT", min_value=0.0, format="$%.2f"),
+        "Lbs (optional)": st.column_config.NumberColumn("Lbs (optional)", min_value=0.0, format="%.0f"),
+    },
+    num_rows="dynamic",
+    hide_index=True,
+    use_container_width=True,
+    key=f"purchase_editor_{_purchase_rc}",
+)
+# Priced lines are written here once the summary knows which inventory is selected.
+purchase_result_slot = st.container()
+
+
+# =========================================================
 # SUMMARY OF SELECTED + CSV EXPORT
 # =========================================================
 st.markdown("---")
@@ -2704,6 +2969,36 @@ if (
     )
 else:
     selected_alt_rolls = pd.DataFrame()
+
+# --- Purchase options -----------------------------------------------------
+# Sized against the inventory already selected, priced by the same aggregation
+# as inventory rolls, then added to the selected rolls.
+_covered_lbs = _purchase_covered_lbs(
+    (selected_exact, "QtyOnHand"), (selected_alt_sheets, "Yield"), (selected_alt_rolls, "Yield"),
+)
+_p_alt_raw, _p_exact, purchase_errors, purchase_notes = build_purchase_lines(
+    purchase_editor_df, _req_width, _covered_lbs,
+    lambda _r: (_qty_lbs_fn(_r) if _qty_lbs_fn is not None else _order_qty),
+    lambda _gn: "Sheeter",
+    grade_df, paper_info_df, order_size_adj_df, exact_at_width=False,
+)
+_p_priced = pd.DataFrame()
+if not purchase_errors and not _p_alt_raw.empty:
+    _p_priced = aggregate_alt_rolls(
+        _p_alt_raw, _req_width, _order_qty, order_size_adj_df,
+        grade_df, paper_info_df, machine_info_df, qty_lbs_fn=_qty_lbs_fn,
+    )
+    if "ConvError" in _p_priced.columns and _p_priced["ConvError"].notna().any():
+        purchase_errors.extend(_p_priced["ConvError"].dropna().astype(str).unique().tolist())
+        _p_priced = pd.DataFrame()
+    elif "ConvertingCostPerCWT" not in _p_priced.columns or _p_priced["ConvertingCostPerCWT"].isna().any():
+        purchase_errors.append(
+            "A purchase row could not be converting-costed from the reference tables. " + ADMIN_CONTACT
+        )
+        _p_priced = pd.DataFrame()
+if not _p_priced.empty:
+    selected_alt_rolls = pd.concat([selected_alt_rolls, _p_priced], ignore_index=True)
+render_purchase_result(purchase_result_slot, _p_priced, purchase_errors, purchase_notes)
 
 # Totals
 if not selected_exact.empty and "QtyOnHand" in selected_exact.columns:
