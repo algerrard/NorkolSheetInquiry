@@ -788,16 +788,31 @@ def calculate_conversion_cost(row, requested_width, grade_df, paper_info_df, mac
         num_rolls = int(units) if units not in [None, 0] else 1
 
         processing_hours = (process_weight / lbs_per_hour) if (lbs_per_hour and lbs_per_hour > 0) else 0.0
-        roll_change_hours = roll_change_hrs * num_rolls
-        total_hours = processing_hours + roll_change_hours + setup_hrs  # Setup added once per group
 
-        total_cost = total_hours * hourly_rate
+        # ConvHrs: hours to run this lot itself, with rolls running together.
+        lot_roll_changes = int(np.ceil(num_rolls / num_shtr_rolls))
+        total_hours = processing_hours + roll_change_hrs * lot_roll_changes + setup_hrs
 
-        # Raw per-row CWT — as if only this alternative were used, no minimum
-        # and no OrderQty surcharge. Both are applied at the summary level
-        # once rows are selected.
+        # $/CWT is priced the way the job is (see the job-level blend): processing
+        # held flat at max(order qty, 20k lbs), roll changes for the rolls that
+        # quantity needs, rolls running together. With one line selected this is
+        # the breakdown's base rate; the OrderQty upcharge and minimum are added
+        # only there. Sheets mode has no scalar order qty, so use the row's own.
+        order_lbs = order_quantity
+        if not order_lbs:
+            _oq = pd.to_numeric(row.get("OrderQtyLbs"), errors="coerce")
+            order_lbs = float(_oq) if pd.notna(_oq) and _oq > 0 else None
+        rate_qty = max(order_lbs or process_weight or 0.0, 20000.0)
+        lbs_per_roll = (process_weight / num_rolls) if num_rolls > 0 else process_weight
+        rolls_needed = int(np.ceil(rate_qty / lbs_per_roll)) if lbs_per_roll and lbs_per_roll > 0 else 1
+        rate_roll_changes = int(np.ceil(rolls_needed / num_shtr_rolls))
+        rate_hours = (
+            (rate_qty / lbs_per_hour if (lbs_per_hour and lbs_per_hour > 0) else 0.0)
+            + roll_change_hrs * rate_roll_changes
+            + setup_hrs
+        )
         conv_cwt = (
-            (total_cost / process_weight) * 100.0
+            (rate_hours * hourly_rate / rate_qty) * 100.0
             if process_weight and process_weight > 0
             else None
         )
