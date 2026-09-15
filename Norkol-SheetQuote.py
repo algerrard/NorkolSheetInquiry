@@ -1475,7 +1475,9 @@ def _apply_run_waste(out, order_quantity, order_size_adj_df, qty_lbs_fn):
     if "Yield" in out.columns:
         out["Yield"] = out["Yield"] * (1 - run_waste)
     if "NetAvgCost" in out.columns:
-        out["NetAvgCost"] = out["NetAvgCost"] * (1 + run_waste)
+        # Divide, don't multiply: cost per usable lb must be total $ / final yield,
+        # and yield was just cut by (1 - run_waste). x (1 + run_waste) understates it.
+        out["NetAvgCost"] = out["NetAvgCost"] / (1 - run_waste)
     return out
 
 
@@ -1566,6 +1568,7 @@ PURCHASE_ROWS_DEFAULT = 3
 PURCHASE_RESULT_LABELS = {
     "GradeName": "Grade", "BasisWt": "Basis Wt", "BasisWtUOM": "UOM", "Caliper": "Caliper",
     "Roll_Width": "Roll Width", "Splits": "Splits", "Waste_Pct": "Trim %",
+    "RunWastePct": "Run Waste %",
     "QtyOnHand": "Purchase Lbs", "Units": "Est. Rolls", "Yield": "Yield Lbs",
     "AvgCost": "Material $/CWT", "NetAvgCost": "Net Material $/CWT",
     "ConvertingCostPerCWT": "Converting $/CWT", "FinalCostCWT": "Final $/CWT",
@@ -1781,6 +1784,8 @@ def render_purchase_result(slot, priced, errors, notes):
         if priced is not None and not priced.empty:
             cols = [c for c in PURCHASE_RESULT_LABELS if c in priced.columns]
             show = priced[cols].copy()
+            if "RunWastePct" in show.columns:
+                show["RunWastePct"] = pd.to_numeric(show["RunWastePct"], errors="coerce") * 100.0
             for c in show.select_dtypes("number").columns:
                 show[c] = show[c].round(2)
             st.dataframe(show.rename(columns=PURCHASE_RESULT_LABELS), hide_index=True,
