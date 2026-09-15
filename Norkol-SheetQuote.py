@@ -1508,7 +1508,8 @@ def purchase_seed(n=PURCHASE_ROWS_DEFAULT):
         "Grade": pd.Series([None] * n, dtype=object),
         "Basis Wt": pd.Series([np.nan] * n, dtype=float),
         "UOM": pd.Series(["LB"] * n, dtype=object),
-        "Caliper (in)": pd.Series([np.nan] * n, dtype=float),
+        # Text, not a number column: a browser number box rejects a bare ".010".
+        "Caliper (in)": pd.Series([None] * n, dtype=object),
         "Roll Width (in)": pd.Series([np.nan] * n, dtype=float),
         "Diameter (in)": pd.Series([np.nan] * n, dtype=float),
         "Cost $/CWT": pd.Series([np.nan] * n, dtype=float),
@@ -1517,6 +1518,8 @@ def purchase_seed(n=PURCHASE_ROWS_DEFAULT):
 
 
 def _purchase_num(v):
+    if isinstance(v, str):
+        v = v.strip()
     v = pd.to_numeric(v, errors="coerce")
     return None if pd.isna(v) else float(v)
 
@@ -1562,7 +1565,11 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
         grade = str(r.get("Grade") or "").strip()
         bw = _purchase_num(r.get("Basis Wt"))
         uom = str(r.get("UOM") or "").strip().upper()
-        cal = _purchase_num(r.get("Caliper (in)"))
+        cal_text = str(r.get("Caliper (in)") or "").strip()
+        cal = _purchase_num(cal_text)
+        if cal_text and cal is None:
+            errors.append(f"{label}: caliper '{cal_text}' is not a number. Enter inches, e.g. .010 or 0.010.")
+            continue
         width = _purchase_num(r.get("Roll Width (in)"))
         diam = _purchase_num(r.get("Diameter (in)"))
         cost = _purchase_num(r.get("Cost $/CWT"))
@@ -2898,7 +2905,7 @@ purchase_editor_df = st.data_editor(
         "Grade": st.column_config.SelectboxColumn("Grade", options=_purchase_grade_opts),
         "Basis Wt": st.column_config.NumberColumn("Basis Wt", min_value=0.0, format="%.2f"),
         "UOM": st.column_config.SelectboxColumn("UOM", options=["LB", "GSM"], default="LB"),
-        "Caliper (in)": st.column_config.NumberColumn("Caliper (in)", min_value=0.0, step=0.0001, format="%.4f"),
+        "Caliper (in)": st.column_config.TextColumn("Caliper (in)", help="Inches, e.g. .010 or 0.010"),
         "Roll Width (in)": st.column_config.NumberColumn("Roll Width (in)", min_value=0.0, format="%.3f"),
         "Diameter (in)": st.column_config.NumberColumn("Diameter (in)", min_value=0.0, format="%.2f"),
         "Cost $/CWT": st.column_config.NumberColumn("Cost $/CWT", min_value=0.0, format="$%.2f"),
