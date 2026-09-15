@@ -2969,19 +2969,37 @@ if (
     equip_type_sel = "Sheeter"
 
     # --- Alt sheets: flat Trimmer rate × yield (per-row model, unchanged) ---
+    # The order is split across the two tables by selected yield, and each part is
+    # costed on its share of the order rather than on every pound selected --
+    # selecting 30,000 lbs of sheets for a 10,000 lb order must not triple the charge.
+    sheets_yield_sel = (
+        selected_alt_sheets["Yield"].fillna(0.0).sum()
+        if not selected_alt_sheets.empty and "Yield" in selected_alt_sheets.columns else 0.0
+    )
+    rolls_yield_sel = (
+        selected_alt_rolls["Yield"].fillna(0.0).sum()
+        if not selected_alt_rolls.empty and "Yield" in selected_alt_rolls.columns else 0.0
+    )
+    if sheets_yield_sel + rolls_yield_sel > 0:
+        sheets_order_qty = order_quantity_param * sheets_yield_sel / (sheets_yield_sel + rolls_yield_sel)
+    else:
+        sheets_order_qty = 0.0
+    rolls_order_qty = order_quantity_param - sheets_order_qty
+
     alt_sheets_job_dollar = 0.0
     if (
-        not selected_alt_sheets.empty
+        sheets_yield_sel > 0
         and "ConvertingCostPerCWT" in selected_alt_sheets.columns
-        and "Yield" in selected_alt_sheets.columns
     ):
-        alt_sheets_job_dollar = (
-            (selected_alt_sheets["ConvertingCostPerCWT"].fillna(0.0) / 100.0)
-            * selected_alt_sheets["Yield"].fillna(0.0)
-        ).sum()
+        sheets_rate_cwt = (
+            (selected_alt_sheets["ConvertingCostPerCWT"].fillna(0.0)
+             * selected_alt_sheets["Yield"].fillna(0.0)).sum()
+            / sheets_yield_sel
+        )
+        alt_sheets_job_dollar = (sheets_rate_cwt / 100.0) * sheets_order_qty
 
     # --- Alt rolls: NCC-style JOB-level calc (setup once, roll changes totalled,
-    # processing scaled by rate_qty = max(order_qty, 20000) for flat base rate) ---
+    # processing scaled by rate_qty = max(rolls' share of order, 20000) for flat base rate) ---
     alt_rolls_job_dollar = 0.0
     if (
         not selected_alt_rolls.empty
@@ -3035,7 +3053,7 @@ if (
                 sheeter_rc = float(mr_sheeter.iloc[0].get("Roll_Change_Hrs", 0.0) or 0.0)
 
                 # Base rate held flat at 20k+ lbs (NCC convention)
-                rate_qty = max(order_quantity_param, 20000)
+                rate_qty = max(rolls_order_qty, 20000)
 
                 rolls_needed = int(np.ceil(rate_qty / avg_yield_per_roll)) if avg_yield_per_roll > 0 else 1
                 roll_change_hrs_job = (
@@ -3046,7 +3064,7 @@ if (
                 cost_at_rate = total_hrs * sheeter_hr
 
                 # Pro-rate to customer's actual order quantity
-                alt_rolls_job_dollar = cost_at_rate * (order_quantity_param / rate_qty)
+                alt_rolls_job_dollar = cost_at_rate * (rolls_order_qty / rate_qty)
 
     raw_conv_dollar = alt_sheets_job_dollar + alt_rolls_job_dollar
 
@@ -3072,7 +3090,10 @@ if (
     final_conv_cwt = (final_conv_dollar / order_quantity_param) * 100.0
 
     conv_breakdown = {
-        "base_cwt": blended_conv_cwt,
+        # The upcharge multiplies the pooled job cost, not the per-row blend, so the
+        # base shown must be that same job cost or the breakdown cannot add up.
+        "base_cwt": (raw_conv_dollar / order_quantity_param) * 100.0,
+        "per_row_conv_cwt": blended_conv_cwt,
         "surcharge_pct": surcharge_pct,
         "surcharged_cwt": (surcharged_dollar / order_quantity_param) * 100.0,
         "min_chg": min_chg,
@@ -3272,7 +3293,7 @@ elif selection_mixed_basis_wts:
 # --- Order Qty Cost breakdown (base rate, upcharge, minimum, freight) ---
 if conv_breakdown is not None and order_qty_cost_cwt is not None:
     with st.expander("Order Qty Cost breakdown"):
-        paper_cwt = blended_cost_cwt - conv_breakdown["base_cwt"]
+        paper_cwt = blended_cost_cwt - conv_breakdown["per_row_conv_cwt"]
         rows = [("Base converting rate", f"${conv_breakdown['base_cwt']:,.2f} / CWT")]
         if conv_breakdown["surcharge_pct"] > 0:
             rows.append((
