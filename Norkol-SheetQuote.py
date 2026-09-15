@@ -3063,7 +3063,9 @@ if _reserved_lbs > 0:
             for _h in _reserved_holders:
                 st.markdown(f"- {_h}")
 
-# Dollar values
+# Material value only -- Blended Cost is the paper cost of the selected lots
+# (total value / total weight x 100), before any converting. Alternatives count
+# at NetAvgCost, which already carries their trim and run waste.
 if not selected_exact.empty and set(["AvgCost", "QtyOnHand"]).issubset(selected_exact.columns):
     exact_value = (
         (selected_exact["AvgCost"].fillna(0.0) / 100.0)
@@ -3073,16 +3075,16 @@ else:
     exact_value = 0.0
 
 alt_sheets_value = 0.0
-if not selected_alt_sheets.empty and set(["FinalCostCWT", "Yield"]).issubset(selected_alt_sheets.columns):
+if not selected_alt_sheets.empty and set(["NetAvgCost", "Yield"]).issubset(selected_alt_sheets.columns):
     alt_sheets_value = (
-        (selected_alt_sheets["FinalCostCWT"].fillna(0.0) / 100.0)
+        (selected_alt_sheets["NetAvgCost"].fillna(0.0) / 100.0)
         * selected_alt_sheets["Yield"].fillna(0.0)
     ).sum()
 
 alt_rolls_value = 0.0
-if not selected_alt_rolls.empty and set(["FinalCostCWT", "Yield"]).issubset(selected_alt_rolls.columns):
+if not selected_alt_rolls.empty and set(["NetAvgCost", "Yield"]).issubset(selected_alt_rolls.columns):
     alt_rolls_value = (
-        (selected_alt_rolls["FinalCostCWT"].fillna(0.0) / 100.0)
+        (selected_alt_rolls["NetAvgCost"].fillna(0.0) / 100.0)
         * selected_alt_rolls["Yield"].fillna(0.0)
     ).sum()
 
@@ -3464,7 +3466,7 @@ if (
     }
 
     # Order Qty Cost = paper portion of blended + order-adjusted converting
-    order_qty_cost_cwt = (blended_cost_cwt - blended_conv_cwt) + final_conv_cwt
+    order_qty_cost_cwt = blended_cost_cwt + final_conv_cwt
     if mweight and mweight > 0:
         order_qty_cost_per_m = order_qty_cost_cwt * 0.01 * mweight
 
@@ -3665,7 +3667,7 @@ elif selection_mixed_calipers:
 # --- Order Qty Cost breakdown (base rate, upcharge, minimum, freight) ---
 if conv_breakdown is not None and order_qty_cost_cwt is not None:
     with st.expander("Order Qty Cost breakdown"):
-        paper_cwt = blended_cost_cwt - conv_breakdown["per_row_conv_cwt"]
+        paper_cwt = blended_cost_cwt
         rows = [("Base converting rate", f"${conv_breakdown['base_cwt']:,.2f} / CWT")]
         if conv_breakdown["surcharge_pct"] > 0:
             rows.append((
