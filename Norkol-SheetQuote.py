@@ -1156,6 +1156,13 @@ if df is None:
 df = drop_non_roll_stock(df)
 reserve_inv_df = drop_non_roll_stock(reserve_inv_df)
 
+# Search dropdowns list free and reserved stock together. A grade, weight or caliper
+# held only in reserve (e.g. converted PEFC rolls) must still be selectable, or an
+# Include-reserved search can never reach it.
+option_df = pd.concat(
+    [f for f in (df, reserve_inv_df) if f is not None and not f.empty], ignore_index=True
+)
+
 # =========================================================
 # SIDEBAR
 # =========================================================
@@ -1195,31 +1202,31 @@ with st.container():
     with col1:
         rc = st.session_state.get("reset_counter", 0)
         wh_opts = (
-            ["All"] + sorted(df["WarehouseGroup"].dropna().unique().tolist())
-            if "WarehouseGroup" in df.columns
+            ["All"] + sorted(option_df["WarehouseGroup"].dropna().unique().tolist())
+            if "WarehouseGroup" in option_df.columns
             else ["All"]
         )
         warehouse_group = st.selectbox("Warehouse Group", wh_opts, key=f"fld_warehouse_group_{rc}")
 
-        if "ProductGroupID" in df.columns:
-            pg_opts = ["All"] + sorted(df["ProductGroupID"].dropna().unique().tolist())
+        if "ProductGroupID" in option_df.columns:
+            pg_opts = ["All"] + sorted(option_df["ProductGroupID"].dropna().unique().tolist())
             product_group = st.selectbox("Product Group", pg_opts, key=f"fld_product_group_{rc}")
-        elif "ProductGroup" in df.columns:
-            pg_opts = ["All"] + sorted(df["ProductGroup"].dropna().unique().tolist())
+        elif "ProductGroup" in option_df.columns:
+            pg_opts = ["All"] + sorted(option_df["ProductGroup"].dropna().unique().tolist())
             product_group = st.selectbox("Product Group", pg_opts, key=f"fld_product_group_{rc}")
         else:
             product_group = "All"
 
         gn_opts = (
-            sorted(df["GradeName"].dropna().unique().tolist())
-            if "GradeName" in df.columns
+            sorted(option_df["GradeName"].dropna().unique().tolist())
+            if "GradeName" in option_df.columns
             else []
         )
         grade_names = st.multiselect("Grade Name(s)", gn_opts, placeholder="All grades (leave empty)", key=f"fld_grade_names_{rc}")
 
         bw_opts = (
-            sorted([x for x in df["BasisWt"].dropna().unique().tolist()])
-            if "BasisWt" in df.columns
+            sorted([x for x in option_df["BasisWt"].dropna().unique().tolist()])
+            if "BasisWt" in option_df.columns
             else []
         )
         basis_weights = st.multiselect("Basis Weight(s)", bw_opts, placeholder="All weights (leave empty)", key=f"fld_basis_weights_{rc}")
@@ -1231,8 +1238,8 @@ with st.container():
             key=f"fld_basis_wt_unit_{rc}",
         )
 
-        if "Caliper" in df.columns:
-            caliper_values = pd.to_numeric(df["Caliper"], errors="coerce").dropna().unique()
+        if "Caliper" in option_df.columns:
+            caliper_values = pd.to_numeric(option_df["Caliper"], errors="coerce").dropna().unique()
             cal_opts = [f"{x:.4f}" for x in sorted(caliper_values)]
             calipers = st.multiselect(
                 "Caliper(s)",
