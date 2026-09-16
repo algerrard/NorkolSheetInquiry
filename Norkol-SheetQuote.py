@@ -1460,6 +1460,37 @@ def _reserve_agg(frame, agg_dict):
     return agg_dict
 
 
+def _reserved_qty_agg(frame, agg_dict):
+    """Pool free and reserved stock into one row, keeping the reserved pounds apart.
+
+    Adds ReservedQty (QtyOnHand of the reserved rolls) and IsReserved (any roll
+    held) to the aggregation. Trim and run waste are the same for every roll in a
+    row, so the reserved share of Yield is Yield x ReservedQty / QtyOnHand.
+    """
+    if "IsReserved" in frame.columns and "QtyOnHand" in frame.columns:
+        held = frame["IsReserved"].fillna(False).astype(bool)
+        frame["IsReserved"] = held
+        frame["ReservedQty"] = pd.to_numeric(frame["QtyOnHand"], errors="coerce").where(held, 0.0)
+        agg_dict["ReservedQty"] = "sum"
+        agg_dict["IsReserved"] = "max"
+    return agg_dict
+
+
+def _row_reserved_qty(row):
+    """Reserved pounds on a pooled row; 0 when nothing in it is held."""
+    v = pd.to_numeric(row.get("ReservedQty"), errors="coerce")
+    return float(v) if pd.notna(v) else 0.0
+
+
+def _reserved_share(frame):
+    """Fraction of each row's pounds that is reserved (1.0 for unpooled rows)."""
+    if "ReservedQty" not in frame.columns:
+        return pd.Series(1.0, index=frame.index)
+    qty = pd.to_numeric(frame["QtyOnHand"], errors="coerce")
+    res = pd.to_numeric(frame["ReservedQty"], errors="coerce")
+    return (res / qty).where(qty > 0, 0.0).fillna(0.0)
+
+
 def _reserved_label(row):
     """Short '🔒 customer (SO#)' marker for a grouped row, or '—' if free stock."""
     if not bool(row.get("IsReserved", False)):
@@ -1860,7 +1891,6 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
 
     group_cols = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
     group_cols = [c for c in group_cols if c in al_rl.columns]
-    group_cols = _with_reserved(group_cols, al_rl)
 
     agg = {"QtyOnHand": "sum", "Yield": "sum", "Splits": "first", "Waste_Pct": "first"}
     if "Units" in al_rl.columns:
@@ -1874,6 +1904,7 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
     if "ProductCategoryID" in al_rl.columns:
         agg["ProductCategoryID"] = "first"
     _reserve_agg(al_rl, agg)
+    _reserved_qty_agg(al_rl, agg)
 
     out = al_rl.groupby(group_cols, as_index=False, dropna=False).agg(agg)
 
@@ -2782,8 +2813,12 @@ if not alternative_rolls.empty:
         "Mill", "Brand", "Qty", "Splits", "Waste%", "RunW%", "Yield", "NetAvgCost",
         "Lbs/Hr", "ConvHrs", "Conv$/CWT", "FinalCost/CWT"
     ]
+    # Reserved stock pools into the same row as free stock; its pounds get their own column.
+    o = 1 if show_reserved_col else 0
     if show_reserved_col:
-        roll_ratios = roll_ratios + [1.8]   # 17 Reserved For
+        roll_headers[7] = "Available Qty"
+        roll_ratios = roll_ratios[:8] + [1.0] + roll_ratios[8:] + [1.8]   # Reserved Qty, Reserved For
+        roll_headers.insert(8, "Reserved Qty")
         roll_headers.append("Reserved For")
 
     roll_ratios = nowrap_widths(roll_ratios, roll_headers, alternative_rolls)
@@ -2829,52 +2864,56 @@ if not alternative_rolls.empty:
             st.write(row.get('Mill', ''))
         with C[6]:  # Brand
             st.write(row.get('Brand', ''))
-        with C[7]:  # QtyOnHand
+        with C[7]:  # Qty (Available Qty when reserved stock is shown)
             v = row.get('QtyOnHand')
             v = float(v) if pd.notna(v) else None
+            if v is not None and show_reserved_col:
+                v -= _row_reserved_qty(row)
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[8]:  # Splits
+        if show_reserved_col:
+            with C[8]:  # Reserved Qty
+                st.write(f"{_row_reserved_qty(row):,.0f}")
+        with C[8 + o]:  # Splits
             v = row.get('Splits')
             st.write(f"{int(v)}x" if pd.notna(v) else '')
-        with C[9]:  # Waste%
+        with C[9 + o]:  # Waste%
             v = row.get('Waste_Pct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}%" if v is not None else '')
-        with C[10]:  # RunW%
+        with C[10 + o]:  # RunW%
             v = row.get('RunWastePct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v * 100:.0f}%" if v is not None and v > 0 else '—')
-        with C[11]:  # Yield
+        with C[11 + o]:  # Yield
             v = row.get('Yield')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[12]:  # NetAvgCost
+        with C[12 + o]:  # NetAvgCost
             v = row.get('NetAvgCost')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[13]:  # Lbs/Hr
+        with C[13 + o]:  # Lbs/Hr
             v = row.get('LbsPerHour')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[14]:  # ConvHrs
+        with C[14 + o]:  # ConvHrs
             v = row.get('ConvHrs')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}h" if v is not None else '')
-        with C[15]:  # Conv$/CWT
+        with C[15 + o]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[16]:  # FinalCost/CWT
+        with C[16 + o]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
         if show_reserved_col:
-            with C[17]:  # Reserved For
+            with C[17 + o]:  # Reserved For
                 st.write(_reserved_label(row))
 
+    # Rows pool free and reserved rolls, so IsReserved is not a key here.
     rl_group_keys = ["GradeName", "BasisWt", "Caliper", "Roll_Width", "Mill", "Brand"]
-    if "IsReserved" in alt_rolls_raw.columns and "IsReserved" in alternative_rolls.columns:
-        rl_group_keys.append("IsReserved")
 
     sync_detail_selection(
         alternative_rolls, alt_rolls_raw,
@@ -3174,7 +3213,8 @@ for _frame, _lbs_col in (
     if _res.empty:
         continue
     _col = _lbs_col if _lbs_col in _res.columns else "QtyOnHand"
-    _reserved_lbs += float(pd.to_numeric(_res.get(_col), errors="coerce").fillna(0.0).sum())
+    # Alternative rolls pool free and reserved rolls; count only the reserved share.
+    _reserved_lbs += float((pd.to_numeric(_res.get(_col), errors="coerce").fillna(0.0) * _reserved_share(_res)).sum())
     for _, _r in _res.iterrows():
         _cust = _clean_val(_r.get("ResCust", ""))
         _so = _clean_val(_r.get("ResSONum", ""))
