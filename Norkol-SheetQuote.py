@@ -1603,6 +1603,13 @@ def aggregate_alt_sheets(al_sh, order_quantity, order_size_adj_df, machine_info_
 PURCHASE_MILL = "Purchase Option"
 PURCHASE_ROWS_DEFAULT = 3
 
+# Purchase roll core comes from the product group, not caliper (Alfred): board
+# groups are on 12" cores most of the time, everything else on 3".
+BOARD_CORE_GROUPS = {
+    "C1S BOARD", "C2S BOARD", "COATED BOXBOARD FSC", "CHIPBOARD",
+    "FOLDING CHIPBOARD FSC", "POLY CTD BOARD", "UNCOATED BOARD",
+}
+
 # Display labels for the priced purchase lines.
 PURCHASE_RESULT_LABELS = {
     "GradeName": "Grade", "BasisWt": "Basis Wt", "BasisWtUOM": "UOM", "Caliper": "Caliper",
@@ -1658,8 +1665,8 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
     grossed up for trim and run waste so their yield fills the gap.
 
     Roll count comes from diameter the way the NCC app estimates it:
-    (Diameter^2 - Core^2) x Width x Density_Factor, with the core from caliper
-    (under 0.008 in -> 3 in, otherwise 12 in).
+    (Diameter^2 - Core^2) x Width x Density_Factor, with the core from the product
+    group (BOARD_CORE_GROUPS -> 12 in, otherwise 3 in). Caliper is optional.
 
     Returns (alt_rows, exact_rows, errors, notes). Any error withholds every
     purchase row: a partial purchase would price a different job than the one
@@ -1678,7 +1685,8 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
         grade = str(r.get("Grade") or "").strip()
         bw = _purchase_num(r.get("Basis Wt"))
         uom = str(r.get("UOM") or "").strip().upper()
-        cal_text = str(r.get("Caliper (in)") or "").strip()
+        cal_raw = r.get("Caliper (in)")
+        cal_text = "" if cal_raw is None or pd.isna(cal_raw) else str(cal_raw).strip()
         cal = _purchase_num(cal_text)
         if cal_text and cal is None:
             errors.append(f"{label}: caliper '{cal_text}' is not a number. Enter inches, e.g. .010 or 0.010.")
@@ -1689,7 +1697,7 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
         lbs = _purchase_num(r.get("Lbs (optional)"))
 
         missing = [name for name, v in (
-            ("Grade", grade), ("Basis Wt", bw), ("UOM", uom), ("Caliper", cal),
+            ("Grade", grade), ("Basis Wt", bw), ("UOM", uom),
             ("Roll Width", width), ("Diameter", diam), ("Cost $/CWT", cost),
         ) if not v]
         if missing:
@@ -1698,7 +1706,7 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
         if uom not in ("LB", "GSM"):
             errors.append(f"{label}: UOM must be LB or GSM.")
             continue
-        if not (0.002 <= cal <= 0.100):
+        if cal is not None and not (0.002 <= cal <= 0.100):
             errors.append(f"{label}: caliper {cal:g} in is outside 0.002-0.100 in. "
                           "Enter caliper in inches (11 pt = 0.011).")
             continue
@@ -1739,7 +1747,7 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
                 f"{area:g} sq in in PaperInformation, so roll count cannot be estimated. {ADMIN_CONTACT}"
             )
             continue
-        core = 3.0 if cal < 0.008 else 12.0
+        core = 12.0 if pg.upper() in BOARD_CORE_GROUPS else 3.0
         if diam <= core:
             errors.append(f"{label}: diameter {diam:g}\" must be larger than the {core:g}\" core.")
             continue
@@ -3014,7 +3022,7 @@ st.subheader("🛒 Purchase Options")
 st.caption(
     "Material we could buy instead of, or alongside, inventory. Check \"Base quote on this\" "
     "to include a row. Rows with Lbs buy that weight; rows left blank share whatever part of "
-    "the order the selected inventory does not cover. Caliper in inches (11 pt = 0.011)."
+    "the order the selected inventory does not cover. Caliper is optional, in inches (11 pt = 0.011)."
 )
 _purchase_grade_opts = (
     sorted(grade_df["Description"].dropna().astype(str).str.strip().unique().tolist())
@@ -3032,7 +3040,7 @@ purchase_editor_df = st.data_editor(
         "Grade": st.column_config.SelectboxColumn("Grade", options=_purchase_grade_opts),
         "Basis Wt": st.column_config.NumberColumn("Basis Wt", min_value=0.0, format="%.2f"),
         "UOM": st.column_config.SelectboxColumn("UOM", options=["LB", "GSM"], default="LB"),
-        "Caliper (in)": st.column_config.TextColumn("Caliper (in)", help="Inches, e.g. .010 or 0.010"),
+        "Caliper (in)": st.column_config.TextColumn("Caliper (in, optional)", help="Inches, e.g. .010 or 0.010"),
         "Roll Width (in)": st.column_config.NumberColumn("Roll Width (in)", min_value=0.0, format="%.3f"),
         "Diameter (in)": st.column_config.NumberColumn("Diameter (in)", min_value=0.0, format="%.2f"),
         "Cost $/CWT": st.column_config.NumberColumn("Cost $/CWT", min_value=0.0, format="$%.2f"),
@@ -3515,9 +3523,11 @@ if (
             # Rolls running simultaneously (Sheeter + thin stock → NumShtrRolls).
             # Same ProductGroupID + Area(IN) key as the per-row stage, so the job
             # blend cannot land on a different basis size than the rows it blends.
-            first_caliper = float(selected_alt_rolls.iloc[0].get("Caliper", 0) or 0)
+            # Board runs one roll only above 0.011 in; a blank caliper runs like the
+            # per-row stage (NumShtrRolls) rather than silently dropping to one roll.
+            first_caliper = pd.to_numeric(selected_alt_rolls.iloc[0].get("Caliper"), errors="coerce")
             rolls_running = 1
-            if first_caliper > 0 and first_caliper <= 0.011:
+            if not (pd.notna(first_caliper) and first_caliper > 0.011):
                 first_row = selected_alt_rolls.iloc[0]
                 first_gid = str(first_row.get("GradeID", "")).strip()
                 first_pg = str(first_row.get("ProductGroupID", "")).strip()
