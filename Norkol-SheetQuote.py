@@ -2150,9 +2150,6 @@ def run_search(params):
         sheet_data[width_col] = pd.to_numeric(sheet_data[width_col], errors="coerce")
         sheet_data[length_col] = pd.to_numeric(sheet_data[length_col], errors="coerce")
         sheet_data = sheet_data.dropna(subset=[width_col, length_col])
-        
-        # Debug: Show how many sheet records exist
-        st.info(f"✓ Found {len(sheet_data)} sheet records in inventory")
 
         # EXACT SHEET MATCHES: Both width AND length must match exactly
         exact_sheets = sheet_data[
