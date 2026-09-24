@@ -2150,9 +2150,6 @@ def run_search(params):
         sheet_data[width_col] = pd.to_numeric(sheet_data[width_col], errors="coerce")
         sheet_data[length_col] = pd.to_numeric(sheet_data[length_col], errors="coerce")
         sheet_data = sheet_data.dropna(subset=[width_col, length_col])
-        
-        # Debug: Show how many sheet records exist
-        st.info(f"✓ Found {len(sheet_data)} sheet records in inventory")
 
         # EXACT SHEET MATCHES: Both width AND length must match exactly
         exact_sheets = sheet_data[
@@ -2787,38 +2784,39 @@ if not alternative_rolls.empty:
         if c not in alternative_rolls.columns:
             alternative_rolls[c] = None
 
-    # 17 columns for rolls
+    # 18 columns for rolls
     roll_ratios = [
         0.5,  # 0 checkbox
         1.4,  # 1 Grade
         0.8,  # 2 BasisWt
-        0.8,  # 3 Caliper
-        0.9,  # 4 RollWidth
-        0.9,  # 5 Mill
-        0.9,  # 6 Brand
-        1.0,  # 7 Qty
-        0.7,  # 8 Splits
-        0.8,  # 9 Waste%
-        0.8,  # 10 RunW%
-        1.0,  # 11 Yield
-        1.0,  # 12 NetAvgCost
-        1.0,  # 13 Lbs/Hr
-        0.9,  # 14 ConvHrs
-        1.0,  # 15 Conv$/CWT
-        1.1   # 16 FinalCost/CWT
+        0.6,  # 3 UOM
+        0.8,  # 4 Caliper
+        0.9,  # 5 RollWidth
+        0.9,  # 6 Mill
+        0.9,  # 7 Brand
+        1.0,  # 8 Qty
+        0.7,  # 9 Splits
+        0.8,  # 10 Waste%
+        0.8,  # 11 RunW%
+        1.0,  # 12 Yield
+        1.0,  # 13 NetAvgCost
+        1.0,  # 14 Lbs/Hr
+        0.9,  # 15 ConvHrs
+        1.0,  # 16 Conv$/CWT
+        1.1   # 17 FinalCost/CWT
     ]
 
     roll_headers = [
-        "☑", "Grade", "BasisWt", "Caliper", "RollWidth",
+        "☑", "Grade", "BasisWt", "UOM", "Caliper", "RollWidth",
         "Mill", "Brand", "Qty", "Splits", "Waste%", "RunW%", "Yield", "NetAvgCost",
         "Lbs/Hr", "ConvHrs", "Conv$/CWT", "FinalCost/CWT"
     ]
     # Reserved stock pools into the same row as free stock; its pounds get their own column.
     o = 1 if show_reserved_col else 0
     if show_reserved_col:
-        roll_headers[7] = "Available Qty"
-        roll_ratios = roll_ratios[:8] + [1.0] + roll_ratios[8:] + [1.8]   # Reserved Qty, Reserved For
-        roll_headers.insert(8, "Reserved Qty")
+        roll_headers[8] = "Available Qty"
+        roll_ratios = roll_ratios[:9] + [1.0] + roll_ratios[9:] + [1.8]   # Reserved Qty, Reserved For
+        roll_headers.insert(9, "Reserved Qty")
         roll_headers.append("Reserved For")
 
     roll_ratios = nowrap_widths(roll_ratios, roll_headers, alternative_rolls)
@@ -2852,64 +2850,67 @@ if not alternative_rolls.empty:
             v = row.get('BasisWt')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.0f}" if v is not None else '')
-        with C[3]:  # Caliper
+        with C[3]:  # Basis weight UOM -- inventory mixes LB and GSM
+            u = str(row.get('BasisWtUOM') or '').strip().upper()
+            st.write(u if u else '—')
+        with C[4]:  # Caliper
             v = row.get('Caliper')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.4f}" if v is not None else '')
-        with C[4]:  # RollWidth
+        with C[5]:  # RollWidth
             v = row.get('Roll_Width')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.2f}\"" if v is not None else '')
-        with C[5]:  # Mill
+        with C[6]:  # Mill
             st.write(row.get('Mill', ''))
-        with C[6]:  # Brand
+        with C[7]:  # Brand
             st.write(row.get('Brand', ''))
-        with C[7]:  # Qty (Available Qty when reserved stock is shown)
+        with C[8]:  # Qty (Available Qty when reserved stock is shown)
             v = row.get('QtyOnHand')
             v = float(v) if pd.notna(v) else None
             if v is not None and show_reserved_col:
                 v -= _row_reserved_qty(row)
             st.write(f"{v:,.0f}" if v is not None else '')
         if show_reserved_col:
-            with C[8]:  # Reserved Qty
+            with C[9]:  # Reserved Qty
                 st.write(f"{_row_reserved_qty(row):,.0f}")
-        with C[8 + o]:  # Splits
+        with C[9 + o]:  # Splits
             v = row.get('Splits')
             st.write(f"{int(v)}x" if pd.notna(v) else '')
-        with C[9 + o]:  # Waste%
+        with C[10 + o]:  # Waste%
             v = row.get('Waste_Pct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}%" if v is not None else '')
-        with C[10 + o]:  # RunW%
+        with C[11 + o]:  # RunW%
             v = row.get('RunWastePct')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v * 100:.0f}%" if v is not None and v > 0 else '—')
-        with C[11 + o]:  # Yield
+        with C[12 + o]:  # Yield
             v = row.get('Yield')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[12 + o]:  # NetAvgCost
+        with C[13 + o]:  # NetAvgCost
             v = row.get('NetAvgCost')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[13 + o]:  # Lbs/Hr
+        with C[14 + o]:  # Lbs/Hr
             v = row.get('LbsPerHour')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:,.0f}" if v is not None else '')
-        with C[14 + o]:  # ConvHrs
+        with C[15 + o]:  # ConvHrs
             v = row.get('ConvHrs')
             v = float(v) if pd.notna(v) else None
             st.write(f"{v:.1f}h" if v is not None else '')
-        with C[15 + o]:  # Conv$/CWT
+        with C[16 + o]:  # Conv$/CWT
             v = row.get('ConvertingCostPerCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
-        with C[16 + o]:  # FinalCost/CWT
+        with C[17 + o]:  # FinalCost/CWT
             v = row.get('FinalCostCWT')
             v = float(v) if pd.notna(v) else None
             st.write(f"${v:.2f}" if v is not None else '')
         if show_reserved_col:
-            with C[17 + o]:  # Reserved For
+            with C[18 + o]:  # Reserved For
                 st.write(_reserved_label(row))
 
     # Rows pool free and reserved rolls, so IsReserved is not a key here.
