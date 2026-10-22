@@ -3266,7 +3266,7 @@ elif requested_width is not None:
                 "Use": st.column_config.CheckboxColumn("Use", default=False),
                 "Lbs (optional)": st.column_config.NumberColumn("Lbs (optional)", min_value=0.0, format="%.0f"),
                 "Basis Wt": st.column_config.NumberColumn("Basis Wt", format="%g"),
-                "Caliper": st.column_config.NumberColumn("Caliper", format="%.3f"),
+                "Caliper": st.column_config.NumberColumn("Caliper", format="%.4f"),
                 "Roll Width": st.column_config.NumberColumn("Roll Width (in)", format="%g"),
                 "Diameter": st.column_config.NumberColumn("Diameter (in)", format="%g"),
                 "Lbs Due": st.column_config.NumberColumn("Lbs Due", format="%d"),
