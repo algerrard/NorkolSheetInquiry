@@ -153,6 +153,14 @@ ADMIN_CONTACT = "Please contact the app administrator to update the reference ta
 ORDER_SIZE_ADJ_BLOB = "Order Size Adjustments.csv"
 PO_DETAIL_BLOB = "SODetail"
 RESERVE_INV_BLOB = "Inventory/ReserveInventory.csv"
+# Open inventory POs with the balance still due in (ordered minus received), one row
+# per PO + grade + basis weight + size. Built by ADF from cieTrade PO/PODetail/WKSDetail.
+INCOMING_PO_BLOB = "PODetail.csv"
+INCOMING_PO_REQUIRED_COLS = [
+    "PONumber", "Supplier", "DeliveryDt", "GradeID", "Grade", "ProductGroupID", "BasisWt",
+    "BasisWtUOM", "Caliper", "RollWd", "SheetSize", "Diameter", "BalanceDueLbs",
+    "PricePerCWT", "Warehouse", "WarehouseGroup",
+]
 
 # Age cutoff for the read-only Reserved Inventory panel, which is a "what has been
 # sitting reserved" list. The quotable pool behind the 🔒 Include reserved inventory
@@ -266,6 +274,45 @@ def load_order_size_adjustments():
     except Exception as e:
         st.warning(f"Could not load order size adjustments: {str(e)}")
         return None
+
+
+@st.cache_data(ttl=3600)
+def load_incoming_po():
+    """Open PO lines still due in, shaped like inventory for matching.
+
+    Roll lines only: a sheet order has no roll width to split. Lines with nothing
+    left to receive are dropped. A blank caliper arrives as 0 and is cleared so it
+    can never match a caliper search.
+    """
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+        blob_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=INCOMING_PO_BLOB)
+        csv_content = blob_client.download_blob().readall().decode("utf-8")
+        ip_df = pd.read_csv(StringIO(csv_content), on_bad_lines="skip", encoding="utf-8")
+        ip_df.columns = ip_df.columns.str.strip()
+        missing = [c for c in INCOMING_PO_REQUIRED_COLS if c not in ip_df.columns]
+        if missing:
+            return None, f"{INCOMING_PO_BLOB} is missing column(s): {', '.join(missing)}."
+        ip_df = ip_df.rename(columns={"Grade": "GradeName", "RollWd": "Roll_Width"})
+        for col in ["BasisWt", "Caliper", "Roll_Width", "Diameter", "CoreSize",
+                    "BalanceDueLbs", "PricePerCWT"]:
+            if col in ip_df.columns:
+                ip_df[col] = pd.to_numeric(ip_df[col], errors="coerce")
+        for col in ["PONumber", "Supplier", "GradeID", "GradeName", "ProductGroupID",
+                    "BasisWtUOM", "SheetSize", "Warehouse", "WarehouseGroup"]:
+            if col in ip_df.columns:
+                ip_df[col] = ip_df[col].fillna("").astype(str).str.strip()
+        if "DeliveryDt" in ip_df.columns:
+            ip_df["DeliveryDt"] = pd.to_datetime(ip_df["DeliveryDt"], errors="coerce")
+        if "Caliper" in ip_df.columns:
+            ip_df.loc[ip_df["Caliper"] <= 0, "Caliper"] = np.nan
+        if "SheetSize" in ip_df.columns:
+            ip_df = ip_df[ip_df["SheetSize"] == ""]
+        ip_df = ip_df[ip_df["BalanceDueLbs"] > 0]
+        return ip_df.reset_index(drop=True), None
+    except Exception as e:
+        # Shown as missing in the sidebar and in the Incoming POs window.
+        return None, f"{INCOMING_PO_BLOB} could not be loaded: {e}"
 
 
 def drop_non_roll_stock(frame):
@@ -958,7 +1005,11 @@ def generate_quote_pdf(search_params, selected_exact, selected_alt_sheets, selec
                     elif col == 'Splits':
                         row_data.append(f"{int(val)}x")
                     elif col == 'Mill':
-                        row_data.append(str(val)[:12] if val else '')  # Truncate supplier to 12 chars
+                        if str(val).startswith('Incoming PO'):
+                            # Keep the due date: second line instead of truncating
+                            row_data.append(str(val).replace(' (', '\n('))
+                        else:
+                            row_data.append(str(val)[:12] if val else '')  # Truncate supplier to 12 chars
                     elif col == 'GradeName':
                         row_data.append(str(val)[:15] if val else '')  # Truncate grade to 15 chars
                     else:
@@ -1149,6 +1200,7 @@ grade_df, paper_info_df, machine_info_df = load_supplementary_data()
 order_size_adj_df = load_order_size_adjustments()
 po_detail_df = load_po_detail()
 reserve_inv_df = load_reserve_inventory()
+incoming_po_df, incoming_po_err = load_incoming_po()
 if df is None:
     st.stop()
 
@@ -1178,6 +1230,7 @@ with st.sidebar:
         st.session_state.seen_alt_sheets_groups = set()
         st.session_state.seen_alt_rolls_groups = set()
         st.session_state.search_params = {}
+        st.session_state.incoming_round = st.session_state.get("incoming_round", 0) + 1
         st.rerun()
     if last_refresh:
         st.info(f"Updated: {last_refresh.strftime('%I:%M %p')}")
@@ -1187,6 +1240,7 @@ with st.sidebar:
     st.success("✅ Machine Info Loaded" if machine_info_df is not None else "⚠️ Machine Info Missing")
     st.success("✅ Order Size Adj Loaded" if order_size_adj_df is not None else "⚠️ Order Size Adj Missing")
     st.success("✅ PO Detail Loaded" if po_detail_df is not None else "⚠️ PO Detail Missing")
+    st.success("✅ Incoming POs Loaded" if incoming_po_df is not None else "⚠️ Incoming POs Missing")
 
 # =========================================================
 # MAIN TITLE
@@ -1416,6 +1470,7 @@ if reset_btn:
     st.session_state.seen_alt_sheets_groups = set()
     st.session_state.seen_alt_rolls_groups = set()
     st.session_state.search_params = {}
+    st.session_state.incoming_round = st.session_state.get("incoming_round", 0) + 1
     st.session_state.reset_counter = st.session_state.get("reset_counter", 0) + 1
     st.rerun()
 
@@ -1699,6 +1754,10 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
     (Diameter^2 - Core^2) x Width x Density_Factor, with the core from the product
     group (BOARD_CORE_GROUPS -> 12 in, otherwise 3 in). Caliper is optional.
 
+    Incoming PO lines come through here too, with three optional columns: "Label"
+    names the row in messages, "Mill" replaces PURCHASE_MILL, and "Max Lbs" (the
+    balance still due) caps the weight a row can supply.
+
     Returns (alt_rows, exact_rows, errors, notes). Any error withholds every
     purchase row: a partial purchase would price a different job than the one
     on screen.
@@ -1712,7 +1771,9 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
     for pos, r in rows.iterrows():
         if r.get("Use") != True:
             continue
-        label = f"Purchase row {pos + 1}"
+        label = str(r.get("Label") or "").strip() or f"Purchase row {pos + 1}"
+        mill = str(r.get("Mill") or "").strip() or PURCHASE_MILL
+        max_lbs = _purchase_num(r.get("Max Lbs"))
         grade = str(r.get("Grade") or "").strip()
         bw = _purchase_num(r.get("Basis Wt"))
         uom = str(r.get("UOM") or "").strip().upper()
@@ -1743,6 +1804,9 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
             continue
         if lbs is not None and lbs <= 0:
             errors.append(f"{label}: Lbs must be greater than zero, or left blank.")
+            continue
+        if lbs is not None and max_lbs is not None and lbs > max_lbs + 0.5:
+            errors.append(f"{label}: {lbs:,.0f} lbs is more than the {max_lbs:,.0f} lbs still due.")
             continue
         if not requested_width or requested_width <= 0:
             errors.append(f"{label}: search with the width needed first.")
@@ -1801,14 +1865,15 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
             continue
 
         prepared.append({
-            "label": label, "exact": exact, "lbs": lbs, "oq": oq, "factor": yield_factor,
+            "label": label, "exact": exact, "lbs": lbs, "max_lbs": max_lbs,
+            "oq": oq, "factor": yield_factor,
             "cost": cost, "roll_wt": (diam ** 2 - core ** 2) * width * density,
             "row": {
                 "GradeID": gid, "GradeName": grade_name, "ProductGroupID": pg,
                 "ProductCategoryID": g.get("ProductCategoryID"),
                 "BasisWt": bw, "BasisWtUOM": uom, "Caliper": cal, "Roll_Width": width,
                 "Diameter": diam, "Splits": splits, "Waste_Pct": waste_pct,
-                "Mill": PURCHASE_MILL, "Brand": "",
+                "Mill": mill, "Brand": "",
             },
         })
 
@@ -1838,6 +1903,12 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
             share = remaining / len(blank)
             for p in blank:
                 p["lbs"] = share / p["factor"]
+                if p["max_lbs"] is not None and p["lbs"] > p["max_lbs"]:
+                    p["lbs"] = p["max_lbs"]
+                    notes.append(
+                        f"{p['label']}: only {p['max_lbs']:,.0f} lbs is still due, so it "
+                        "covers part of the order."
+                    )
 
     alt_rows, exact_rows = [], []
     for p in prepared:
@@ -1850,23 +1921,24 @@ def build_purchase_lines(editor_df, requested_width, covered_lbs, order_qty_lbs_
     return pd.DataFrame(alt_rows), pd.DataFrame(exact_rows), errors, notes
 
 
-def render_purchase_result(slot, priced, errors, notes):
+def render_purchase_result(slot, priced, errors, notes, labels=PURCHASE_RESULT_LABELS,
+                           withheld="Purchase options are left out of the summary until these rows are fixed."):
     """Write the priced purchase lines (or why they were withheld) into the box."""
     with slot:
         for e in errors:
             st.error(e)
         if errors:
-            st.caption("Purchase options are left out of the summary until these rows are fixed.")
+            st.caption(withheld)
         for n in notes:
             st.warning(n)
         if priced is not None and not priced.empty:
-            cols = [c for c in PURCHASE_RESULT_LABELS if c in priced.columns]
+            cols = [c for c in labels if c in priced.columns]
             show = priced[cols].copy()
             if "RunWastePct" in show.columns:
                 show["RunWastePct"] = pd.to_numeric(show["RunWastePct"], errors="coerce") * 100.0
             for c in show.select_dtypes("number").columns:
-                show[c] = show[c].round(2)
-            st.dataframe(show.rename(columns=PURCHASE_RESULT_LABELS), hide_index=True,
+                show[c] = show[c].round(4 if c == "Caliper" else 2)
+            st.dataframe(show.rename(columns=labels), hide_index=True,
                          use_container_width=True)
 
 
@@ -1961,6 +2033,117 @@ def aggregate_alt_rolls(al_rl, requested_width, order_quantity, order_size_adj_d
         out = out.drop(columns=[inv_col], errors="ignore")
 
     return out
+
+
+# =========================================================
+# INCOMING POs (open PO balances due into a warehouse)
+# =========================================================
+INCOMING_RESULT_LABELS = {
+    **PURCHASE_RESULT_LABELS, "Mill": "Source", "QtyOnHand": "Lbs Used",
+}
+
+
+def incoming_mill(due):
+    """Mill label for a selected PO line. Supplier and PO# stay off the quote."""
+    return f"Incoming PO (due {due:%m/%d/%y})" if pd.notna(due) else "Incoming PO"
+
+
+# The sheeter's widest roll; matches the limit run_search applies to alternative rolls.
+SHEETER_MAX_ROLL_WIDTH = 65.0
+
+
+def find_incoming_po(ip_df, params, requested_width):
+    """Open PO lines that fit the search, with Splits and Waste_Pct set.
+
+    Warehouse group, product group and grade filter as they do for inventory.
+    Basis weight OR caliper must match (caliper within the same +/-5% band): many
+    PO lines carry no caliper, so a caliper search alone would hide them. Diameter
+    is ignored. Width follows the alternative rolls rule: at least the sheet width,
+    no wider than the sheeter takes, within the max waste %. Lines with no
+    warehouse group only show when the search is for All warehouses.
+    """
+    if ip_df is None or ip_df.empty or not requested_width:
+        return pd.DataFrame()
+    f = ip_df.copy()
+
+    wg = str(params.get("warehouse_group") or "All").strip()
+    if wg != "All":
+        f = f[f["WarehouseGroup"] == wg]
+    pg = str(params.get("product_group") or "All").strip()
+    if pg != "All":
+        f = f[f["ProductGroupID"] == pg]
+    grades = [str(g).strip() for g in (params.get("grade_names") or [])]
+    if grades:
+        f = f[f["GradeName"].isin(grades)]
+
+    bw_vals = [float(b) for b in (params.get("basis_weights") or [])]
+    cal_band = caliper_range(params.get("calipers"))
+    bw_ok = f["BasisWt"].isin(bw_vals)
+    cal_ok = f["Caliper"].between(*cal_band) if cal_band else pd.Series(False, index=f.index)
+    if bw_vals and cal_band:
+        f = f[bw_ok | cal_ok]
+    elif bw_vals:
+        f = f[bw_ok]
+    elif cal_band:
+        f = f[cal_ok]
+
+    f = f.dropna(subset=["Roll_Width"])
+    f = f[(f["Roll_Width"] >= requested_width) & (f["Roll_Width"] <= SHEETER_MAX_ROLL_WIDTH)].copy()
+    if f.empty:
+        return pd.DataFrame()
+    f["Splits"] = (f["Roll_Width"] / requested_width).astype(int)
+    f["Waste_Pct"] = (f["Roll_Width"] - f["Splits"] * requested_width) / f["Roll_Width"] * 100.0
+    f = f[f["Waste_Pct"] <= float(params.get("max_waste_pct") or 0.0)]
+    return f.sort_values(["DeliveryDt", "PONumber"], na_position="last").reset_index(drop=True)
+
+
+def incoming_seed(matches):
+    """Editor rows for the Incoming POs window: Use and Lbs are the only inputs."""
+    return pd.DataFrame({
+        "Use": pd.Series([False] * len(matches), dtype=bool),
+        "Lbs (optional)": pd.Series([np.nan] * len(matches), dtype=float),
+        "PO": matches["PONumber"],
+        "Supplier": matches["Supplier"],
+        "Due": matches["DeliveryDt"].dt.date,
+        "Grade": matches["GradeName"],
+        "Basis Wt": matches["BasisWt"],
+        "UOM": matches["BasisWtUOM"],
+        "Caliper": matches["Caliper"],
+        "Roll Width": matches["Roll_Width"],
+        "Splits": matches["Splits"],
+        "Trim %": matches["Waste_Pct"].round(2),
+        "Lbs Due": matches["BalanceDueLbs"],
+        "$/CWT": matches["PricePerCWT"],
+        "Warehouse": matches["Warehouse"],
+    })
+
+
+def incoming_to_purchase_rows(editor_df, matches):
+    """Checked Incoming PO rows in the shape build_purchase_lines reads."""
+    if editor_df is None or editor_df.empty or matches is None or matches.empty:
+        return pd.DataFrame()
+    rows = []
+    for pos, e in editor_df.reset_index(drop=True).iterrows():
+        if e.get("Use") != True or pos >= len(matches):
+            continue
+        m = matches.iloc[pos]
+        cal = m.get("Caliper")
+        rows.append({
+            "Use": True,
+            "Grade": m["GradeName"],
+            "Basis Wt": m["BasisWt"],
+            "UOM": m["BasisWtUOM"],
+            "Caliper (in)": f"{cal:.4f}" if pd.notna(cal) else None,
+            "Roll Width (in)": m["Roll_Width"],
+            "Diameter (in)": m.get("Diameter"),
+            "Cost $/CWT": m.get("PricePerCWT"),
+            "Lbs (optional)": e.get("Lbs (optional)"),
+            "Label": f"PO {m['PONumber']} ({m['GradeName']} {m['BasisWt']:g} {m['BasisWtUOM']} "
+                     f"x {m['Roll_Width']:g}\")",
+            "Mill": incoming_mill(m.get("DeliveryDt")),
+            "Max Lbs": m["BalanceDueLbs"],
+        })
+    return pd.DataFrame(rows)
 
 
 def _group_key_series(df, keys):
@@ -2359,6 +2542,8 @@ if search_btn:
     st.session_state.sel_alt_rolls_detail = set()
     st.session_state.seen_alt_sheets_groups = set()
     st.session_state.seen_alt_rolls_groups = set()
+    # Fresh Incoming POs editor: its checks and Lbs belong to the previous search.
+    st.session_state.incoming_round = st.session_state.get("incoming_round", 0) + 1
 
 exact_matches = pd.DataFrame()
 alternative_sheets = pd.DataFrame()
@@ -3055,6 +3240,47 @@ else:
 
 
 # =========================================================
+# INCOMING POs (selection box; priced in the summary below)
+# =========================================================
+st.markdown("---")
+st.subheader("🚚 Incoming POs (Due In)")
+incoming_matches = pd.DataFrame()
+incoming_editor_df = pd.DataFrame()
+if incoming_po_df is None:
+    st.warning(f"Open POs are not shown. {incoming_po_err}")
+elif requested_width is not None:
+    incoming_matches = find_incoming_po(incoming_po_df, st.session_state.search_params, requested_width)
+    if incoming_matches.empty:
+        st.info("No open POs due in match this search.")
+    else:
+        st.caption(
+            "Open POs with a balance still due, matching on basis weight or caliper and a roll "
+            "width that sheets within the max waste %. Check \"Use\" to include a line. Leave Lbs blank to fill whatever part of "
+            "the order the selected inventory does not cover, up to the balance due. "
+            "Lines with no warehouse group only show when searching All warehouses."
+        )
+        incoming_editor_df = st.data_editor(
+            incoming_seed(incoming_matches),
+            column_config={
+                "Use": st.column_config.CheckboxColumn("Use", default=False),
+                "Lbs (optional)": st.column_config.NumberColumn("Lbs (optional)", min_value=0.0, format="%.0f"),
+                "Basis Wt": st.column_config.NumberColumn("Basis Wt", format="%g"),
+                "Caliper": st.column_config.NumberColumn("Caliper", format="%.3f"),
+                "Roll Width": st.column_config.NumberColumn("Roll Width (in)", format="%g"),
+                "Lbs Due": st.column_config.NumberColumn("Lbs Due", format="%d"),
+                "$/CWT": st.column_config.NumberColumn("$/CWT", format="$%.2f"),
+            },
+            disabled=[c for c in incoming_seed(incoming_matches.head(0)).columns
+                      if c not in ("Use", "Lbs (optional)")],
+            hide_index=True,
+            use_container_width=True,
+            key=f"incoming_editor_{st.session_state.get('incoming_round', 0)}",
+        )
+# Priced lines are written here once the summary knows which inventory is selected.
+incoming_result_slot = st.container()
+
+
+# =========================================================
 # PURCHASE OPTIONS (entry box; priced in the summary below)
 # =========================================================
 st.markdown("---")
@@ -3151,6 +3377,39 @@ if (
     )
 else:
     selected_alt_rolls = pd.DataFrame()
+
+# --- Incoming POs ---------------------------------------------------------
+# Priced exactly like a purchase line, at the PO's own $/CWT, and sized before
+# purchases: material already on order is used ahead of buying more.
+_i_covered = _purchase_covered_lbs(
+    (selected_exact, "QtyOnHand"), (selected_alt_sheets, "Yield"), (selected_alt_rolls, "Yield"),
+)
+_i_alt_raw, _i_exact, incoming_errors, incoming_notes = build_purchase_lines(
+    incoming_to_purchase_rows(incoming_editor_df, incoming_matches), _req_width, _i_covered,
+    lambda _r: (_qty_lbs_fn(_r) if _qty_lbs_fn is not None else _order_qty),
+    lambda _gn: "Sheeter",
+    grade_df, paper_info_df, order_size_adj_df, exact_at_width=False,
+)
+_i_priced = pd.DataFrame()
+if not incoming_errors and not _i_alt_raw.empty:
+    _i_priced = aggregate_alt_rolls(
+        _i_alt_raw, _req_width, _order_qty, order_size_adj_df,
+        grade_df, paper_info_df, machine_info_df, qty_lbs_fn=_qty_lbs_fn,
+    )
+    if "ConvError" in _i_priced.columns and _i_priced["ConvError"].notna().any():
+        incoming_errors.extend(_i_priced["ConvError"].dropna().astype(str).unique().tolist())
+        _i_priced = pd.DataFrame()
+    elif "ConvertingCostPerCWT" not in _i_priced.columns or _i_priced["ConvertingCostPerCWT"].isna().any():
+        incoming_errors.append(
+            "An incoming PO line could not be converting-costed from the reference tables. " + ADMIN_CONTACT
+        )
+        _i_priced = pd.DataFrame()
+if not _i_priced.empty:
+    selected_alt_rolls = pd.concat([selected_alt_rolls, _i_priced], ignore_index=True)
+render_purchase_result(
+    incoming_result_slot, _i_priced, incoming_errors, incoming_notes, labels=INCOMING_RESULT_LABELS,
+    withheld="Incoming POs are left out of the summary until these lines are fixed.",
+)
 
 # --- Purchase options -----------------------------------------------------
 # Sized against the inventory already selected, priced by the same aggregation
